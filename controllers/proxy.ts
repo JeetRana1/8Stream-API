@@ -216,10 +216,18 @@ export default async function proxy(req: Request, res: Response) {
                     }
 
                     if (response.status >= 400 && response.status !== 404) {
-                        console.log(`[Proxy Adaptive] Direct returned ${response.status}. Switching to Tor...`);
-                        response = await tryFetch(true);
+                        // SKIP TOR FOR VIXSRC PLAYLISTS (100% BLOCKED ON TOR)
+                        if (targetUrl.includes('vixsrc.to/playlist/')) {
+                            console.log(`[Proxy Adaptive] VixSrc playlist blocked. Skipping Tor (blocked by provider).`);
+                        } else {
+                            console.log(`[Proxy Adaptive] Direct returned ${response.status}. Switching to Tor...`);
+                            response = await tryFetch(true);
+                        }
                     }
                 } catch (e) {
+                    if (targetUrl.includes('vixsrc.to/playlist/')) {
+                        throw new Error("VixSrc direct blocked and skipping Tor.");
+                    }
                     response = await tryFetch(true);
                 }
             } else {
