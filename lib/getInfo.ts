@@ -14,11 +14,15 @@ export default async function getInfo(id: string) {
       `/play/${id}`,
       `/v/${id}`,
       `/watch/${id}`,
+      `/series/${id}`,
+      `/tv/${id}`,
       `/play/tv/${id}`,
       `/play/movie/${id}`,
+      `/play/series/${id}`,
       `/embed/${id}`,
       `/embed/tv/${id}`,
-      `/embed/movie/${id}`
+      `/embed/movie/${id}`,
+      `/embed/series/${id}`
     ];
 
 

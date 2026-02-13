@@ -136,7 +136,33 @@ export async function resolveImdbToTmdb(imdbId: string, type: 'movie' | 'tv' = '
             return tmdbId;
         }
     } catch (e: any) {
-        console.log(`[TMDB Resolver] IMDB->TMDB conversion failed: ${e.message}`);
+        console.log(`[TMDB Resolver] IMDB->TMDB API conversion failed: ${e.message}. Trying scraping fallback...`);
+
+        try {
+            // Scrape TMDB search page
+            const url = `https://www.themoviedb.org/search?query=${imdbId}`;
+            const response = await axios.get(url, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                },
+                timeout: 10000
+            });
+
+            const html = response.data.toString();
+            // Look for patterns like /movie/123 or /tv/123
+            const movieMatch = html.match(/\/movie\/(\d+)/);
+            const tvMatch = html.match(/\/tv\/(\d+)/);
+
+            const tmdbId = type === 'tv' ? (tvMatch?.[1] || movieMatch?.[1]) : (movieMatch?.[1] || tvMatch?.[1]);
+
+            if (tmdbId) {
+                console.log(`[TMDB Resolver] Successfully converted ${imdbId} -> ${tmdbId} via scraping search`);
+                cache.set(cacheKey, tmdbId, 24 * 60 * 60 * 1000);
+                return tmdbId;
+            }
+        } catch (scrapeError: any) {
+            console.log(`[TMDB Resolver] IMDB->TMDB scraping fallback failed: ${scrapeError.message}`);
+        }
     }
 
     return imdbId;

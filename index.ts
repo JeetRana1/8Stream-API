@@ -54,6 +54,8 @@ const Port = process.env.PORT || 7860;
 
 app.listen(Port, () => {
   console.log(`Server running on port ${Port}`);
+  console.log(`Environment Diagnostics: TMDB_API_KEY is ${process.env.TMDB_API_KEY ? 'present' : 'MISSING'}`);
+  console.log(`Environment Diagnostics: BASE_URL is ${process.env.BASE_URL ? 'present' : 'MISSING'}`);
 });
 
 export default app;
