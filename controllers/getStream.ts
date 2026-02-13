@@ -65,6 +65,7 @@ export default async function getStream(req: Request, res: Response) {
             },
             httpAgent: mode.agent,
             httpsAgent: mode.agent,
+            responseType: 'text',
             timeout: 15000,
             validateStatus: (status) => status < 500 // Accept any non-5xx status
           });

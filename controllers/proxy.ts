@@ -138,7 +138,9 @@ export default async function proxy(req: Request, res: Response) {
                 try {
                     const proxyHost = new URL(proxyRef).hostname;
                     if (!url.includes(proxyHost)) {
-                        referer = url.includes('vixsrc.to') ? "https://vixsrc.to/" : `https://${uri.host}/`;
+                        referer = url.includes('vixsrc.to') ? (proxyRef || "https://vixsrc.to/") : `https://${uri.host}/`;
+                    } else {
+                        referer = proxyRef;
                     }
                 } catch (e) {
                     referer = url.includes('vixsrc.to') ? "https://vixsrc.to/" : `https://${uri.host}/`;
@@ -152,7 +154,7 @@ export default async function proxy(req: Request, res: Response) {
             if (url.includes('vixsrc.to')) {
                 return {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                    "Referer": "https://vixsrc.to/",
+                    "Referer": referer,
                     "Origin": "https://vixsrc.to",
                     "Accept": "*/*"
                 };

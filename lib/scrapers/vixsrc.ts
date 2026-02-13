@@ -54,7 +54,7 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
         }
 
         if (playlistData && playlistData.url) {
-            const finalUrl = `${playlistData.url}?token=${playlistData.params.token}&expires=${playlistData.params.expires}`;
+            const finalUrl = `${playlistData.url}?token=${playlistData.params.token}&expires=${playlistData.params.expires}&proxy_ref=${encodeURIComponent(url)}`;
             return {
                 success: true,
                 streamUrl: finalUrl,
