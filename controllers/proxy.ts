@@ -113,7 +113,7 @@ export default async function proxy(req: Request, res: Response) {
         const proxyRef = req.query.proxy_ref as string;
 
         // 2. Identify file types and generate smart headers
-        const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt');
+        const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt') || targetUrl.includes('vixsrc.to/playlist/');
         isSegment = targetUrl.includes('.ts') || targetUrl.includes('.mp4');
 
         const getProxyHeaders = (url: string) => {
@@ -130,6 +130,8 @@ export default async function proxy(req: Request, res: Response) {
                     referer = "https://vidsrc.me/";
                 } else if (url.includes('vidlink')) {
                     referer = "https://vidlink.pro/";
+                } else if (url.includes('vixsrc.to')) {
+                    referer = "https://vixsrc.to/";
                 } else if (url.includes('superembed')) {
                     referer = "https://superembed.stream/";
                 } else {
@@ -141,10 +143,10 @@ export default async function proxy(req: Request, res: Response) {
                 try {
                     const proxyHost = new URL(proxyRef).hostname;
                     if (!url.includes(proxyHost)) {
-                        referer = `https://${uri.host}/`;
+                        referer = url.includes('vixsrc.to') ? "https://vixsrc.to/" : `https://${uri.host}/`;
                     }
                 } catch (e) {
-                    referer = `https://${uri.host}/`;
+                    referer = url.includes('vixsrc.to') ? "https://vixsrc.to/" : `https://${uri.host}/`;
                 }
             }
 
@@ -184,7 +186,8 @@ export default async function proxy(req: Request, res: Response) {
         try {
             // Priority for segments: Try Direct FIRST for speed, then Tor Fallback
             // But if we detect a 403 (Block), we fail-fast to Tor to save time
-            if (isSegment) {
+            // VixSrc is also sensitive to Tor, so try direct FIRST for VixSrc too.
+            if (isSegment || targetUrl.includes('vixsrc')) {
                 try {
                     // Try Direct First
                     response = await tryFetch(false);
@@ -196,7 +199,7 @@ export default async function proxy(req: Request, res: Response) {
                     response = await tryFetch(true);
                 }
             } else {
-                // Manifests always try Tor first for privacy
+                // Manifests usually try Tor first for privacy
                 try {
                     response = await tryFetch(true);
                 } catch (e) {
