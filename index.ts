@@ -100,4 +100,16 @@ app.listen(Port, () => {
   console.log(`Server running on port ${Port} (v3 - Direct Fallback enabled)`);
 });
 
+// Global Error Handlers to prevent crashes
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION! Shutting down...', err);
+  // Ideally, restart service or log to external service
+  // For now, keep running but log to console
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED REJECTION! Shutting down...', err);
+  // Ideally, restart service or log to external service
+});
+
 export default app;
