@@ -64,6 +64,7 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
 
         return { success: false, message: 'Playlist data not found in page source' };
     } catch (e: any) {
+        console.error(`[scrapeVixsrc] Error: ${e.message}`, e.response ? e.response.status : '');
         return { success: false, message: e.message };
     }
 }

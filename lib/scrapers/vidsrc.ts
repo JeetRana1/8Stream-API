@@ -32,7 +32,14 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
             "malocacomals.com"
         ];
 
-        const isBlacklisted = blacklistedDomains.some(domain => baseDom.includes(domain));
+        // Exception: vidsrc-embed.ru OFTEN uses cloudnestra, and users report it works.
+        // So if baseUrl is vidsrc-embed.ru, allows cloudnestra.
+        const allowCloudnestra = baseUrl.includes("vidsrc-embed.ru");
+
+        const isBlacklisted = blacklistedDomains.some(domain => {
+            if (allowCloudnestra && domain === "cloudnestra.com") return false;
+            return baseDom.includes(domain);
+        });
 
         if (isBlacklisted) {
             console.log(`[scrapeVidsrc] Base domain ${baseDom} is blacklisted. Skipping ${baseUrl}`);
@@ -57,7 +64,11 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
             }
         });
 
+        console.log(`[scrapeVidsrc] Found ${servers.length} servers on ${baseUrl}`);
+
         if (servers.length === 0) {
+            console.log(`[scrapeVidsrc] HTML length: ${res.data.length}`);
+            // console.log(`[scrapeVidsrc] HTML preview: ${res.data.substring(0, 500)}`);
             return { success: false, message: "No servers found" };
         }
 
@@ -146,6 +157,7 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
 
         return { success: false, message: "Failed to extract from any server" };
     } catch (error: any) {
+        console.error(`[scrapeVidsrc] Failed to scrape ${baseUrl}: ${error.message}`, error.response ? error.response.status : '');
         return { success: false, message: error.message };
     }
 }
