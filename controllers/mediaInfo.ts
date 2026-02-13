@@ -42,7 +42,8 @@ export default async function mediaInfo(req: Request, res: Response) {
       extraSources = await scrapeAll(
         finalId,
         (type as any) || 'movie',
-        s ? parseInt(s as string) : undefined,
+        s ? parseInt(s as string) : (type === 'tv' ? 1 : undefined),
+        e ? parseInt(e as string) : (type === 'tv' ? 1 : undefined)
       );
     } catch (e) {
       console.error("[mediaInfo] New scrapers failed:", e);
