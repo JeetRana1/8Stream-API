@@ -47,16 +47,38 @@ export default async function getStream(req: Request, res: Response) {
       const playlistUrl = `${baseDomain}/playlist/${path}.txt`;
 
       console.log(`[getStream] Mirroring from: ${baseDomain}`);
-      const response = await axios.get(playlistUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-          "Referer": baseDomain + "/",
-          "X-Csrf-Token": key
-        },
-        httpAgent: torAgent,
-        httpsAgent: torAgent,
-        timeout: 15000,
-      });
+
+      let response;
+      let lastError;
+      const modes = [
+        { name: 'Tor', agent: torAgent },
+        { name: 'Direct', agent: undefined }
+      ];
+
+      for (const mode of modes) {
+        try {
+          response = await axios.get(playlistUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+              "Referer": baseDomain + "/",
+              "X-Csrf-Token": key
+            },
+            httpAgent: mode.agent,
+            httpsAgent: mode.agent,
+            timeout: 15000,
+          });
+          if (response.status === 200) {
+            console.log(`[getStream] Success via ${mode.name}`);
+            break;
+          }
+        } catch (e: any) {
+          console.log(`[getStream] Failed via ${mode.name}: ${e.message}`);
+          lastError = e;
+        }
+      }
+
+      if (!response && lastError) throw lastError;
+      if (!response) throw new Error("Failed to fetch stream from mirror");
 
       finalStreamUrl = response.data;
     }
