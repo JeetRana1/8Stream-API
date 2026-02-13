@@ -41,7 +41,7 @@ export default async function mediaInfo(req: Request, res: Response) {
       // Some scrapers like VidSrcMe need TMDB ID, others work with IMDB
       const { scrapeAll } = require("../lib/scrapers");
       extraSources = await scrapeAll(
-        id as string, // Use original ID, not resolved IMDB ID
+        finalId, // Use resolved IMDB ID for better compatibility
         (type as any) || 'movie',
         s ? parseInt(s as string) : (type === 'tv' ? 1 : undefined),
         e ? parseInt(e as string) : (type === 'tv' ? 1 : undefined)
@@ -50,34 +50,41 @@ export default async function mediaInfo(req: Request, res: Response) {
       console.error("[mediaInfo] New scrapers failed:", e);
     }
 
-    // Combine data
+    // Ensure data has the correct structure
+    const baseData = data.success ? data : {
+      success: false,
+      data: {
+        playlist: [],
+        key: ""
+      },
+      message: data.message || "Primary source unavailable"
+    };
+
+    // Combine data with consistent structure
     const enhancedData = {
-      ...data,
+      success: baseData.success || extraSources.length > 0,
+      data: baseData.data || {
+        playlist: [],
+        key: ""
+      },
+      message: baseData.success ? undefined : (extraSources.length > 0 ? "Using alternative sources" : "No streams available"),
       extraSources: extraSources,
       source: "8stream"
     };
 
     console.log(`Response data (enhanced):`, {
       success: enhancedData.success,
-      extraSourcesCount: extraSources.length
+      primarySuccess: baseData.success,
+      extraSourcesCount: extraSources.length,
+      message: enhancedData.message
     });
 
     // Cache the result if successful or if we have extra sources
-    if (data.success || extraSources.length > 0) {
-      enhancedData.success = true; // Mark as success if we found anything
+    if (enhancedData.success) {
       cache.set(cacheKey, enhancedData, 30 * 60 * 1000);
     } else {
-      // Return unsuccessful response if nothing found
-      const emptyData = {
-        success: false,
-        data: {
-          playlist: [],
-          key: ""
-        },
-        extraSources: [],
-        source: "8stream"
-      };
-      return res.json(emptyData);
+      // Cache failed result for shorter time to allow retries
+      cache.set(cacheKey, enhancedData, 5 * 60 * 1000);
     }
 
     res.json(enhancedData);

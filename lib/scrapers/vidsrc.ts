@@ -25,10 +25,20 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
         const iframeSrc = $("iframe").attr("src") || "";
         let baseDom = iframeSrc.startsWith("//") ? "https:" + iframeSrc : iframeSrc;
 
-        if (baseDom.includes("cloudnestra.com") || baseDom.includes("protection-episode-i-222.site")) {
-            console.log(`[scrapeVidsrc] Base domain ${baseDom} is blacklisted.`);
-            baseDom = ""; // Invalidate it
+        // Blacklist check - skip known problematic domains
+        const blacklistedDomains = [
+            "cloudnestra.com",
+            "protection-episode-i-222.site",
+            "malocacomals.com"
+        ];
+
+        const isBlacklisted = blacklistedDomains.some(domain => baseDom.includes(domain));
+
+        if (isBlacklisted) {
+            console.log(`[scrapeVidsrc] Base domain ${baseDom} is blacklisted. Skipping ${baseUrl}`);
+            return { success: false, message: `Source ${baseUrl} returned blacklisted domain` };
         }
+
         let origin = "";
         try {
             origin = baseDom ? new URL(baseDom).origin : "";
@@ -48,14 +58,6 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
         });
 
         if (servers.length === 0) {
-            // Fallback: try to see if it's a direct iframe without server list
-            if (iframeSrc) {
-                return {
-                    success: true,
-                    streamUrl: baseDom,
-                    isEmbed: true
-                };
-            }
             return { success: false, message: "No servers found" };
         }
 
@@ -140,15 +142,6 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
             } catch (err: any) {
                 console.error(`[scrapeVidsrc] Error with server ${server.name} on domain ${baseUrl}: ${err.message}`);
             }
-        }
-
-        // Final fallback: if no streams found but we have an iframe, return the iframe as an embed
-        if (iframeSrc && baseDom !== "") {
-            return {
-                success: true,
-                streamUrl: baseDom,
-                isEmbed: true
-            };
         }
 
         return { success: false, message: "Failed to extract from any server" };
