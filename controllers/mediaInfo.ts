@@ -37,10 +37,11 @@ export default async function mediaInfo(req: Request, res: Response) {
     // Fetch from new providers
     let extraSources: any[] = [];
     try {
-      // Trigger scrapers for the resolved ID (works for both TMDB and IMDB)
+      // Trigger scrapers for the ORIGINAL ID (TMDB or IMDB)
+      // Some scrapers like VidSrcMe need TMDB ID, others work with IMDB
       const { scrapeAll } = require("../lib/scrapers");
       extraSources = await scrapeAll(
-        finalId,
+        id as string, // Use original ID, not resolved IMDB ID
         (type as any) || 'movie',
         s ? parseInt(s as string) : (type === 'tv' ? 1 : undefined),
         e ? parseInt(e as string) : (type === 'tv' ? 1 : undefined)
