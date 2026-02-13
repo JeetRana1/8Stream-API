@@ -34,7 +34,7 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
 
         // Exception: vidsrc-embed.ru OFTEN uses cloudnestra, and users report it works.
         // So if baseUrl is vidsrc-embed.ru, allows cloudnestra.
-        const allowCloudnestra = baseUrl.includes("vidsrc-embed.ru");
+        const allowCloudnestra = baseUrl.includes("vidsrc-embed.ru") || baseUrl.includes("vidsrc-embed.su") || baseUrl.includes("vsrc.su");
 
         const isBlacklisted = blacklistedDomains.some(domain => {
             if (allowCloudnestra && domain === "cloudnestra.com") return false;
@@ -64,11 +64,31 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
             }
         });
 
+        // Fallback: If no servers found via selector, try generic regex for data-hash
+        if (servers.length === 0) {
+            console.log(`[scrapeVidsrc] No servers found via selector. Trying regex fallback...`);
+            const hashRegex = /data-hash="([^"]+)"/g;
+            let match;
+            while ((match = hashRegex.exec(res.data)) !== null) {
+                // Try to find the name near the hash or just default to "Server"
+                // This is a rough fallback
+                const hash = match[1];
+                // Check if we already have this hash (avoid dupes)
+                if (!servers.find(s => s.dataHash === hash)) {
+                    servers.push({
+                        name: "VidSrc Server", // Generic name
+                        dataHash: hash
+                    });
+                }
+            }
+        }
+
         console.log(`[scrapeVidsrc] Found ${servers.length} servers on ${baseUrl}`);
 
         if (servers.length === 0) {
             console.log(`[scrapeVidsrc] HTML length: ${res.data.length}`);
-            // console.log(`[scrapeVidsrc] HTML preview: ${res.data.substring(0, 500)}`);
+            // Log a snippet to help debug
+            console.log(`[scrapeVidsrc] HTML snippet: ${res.data.substring(0, 200)}...${res.data.substring(res.data.length - 200)}`);
             return { success: false, message: "No servers found" };
         }
 
