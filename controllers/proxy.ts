@@ -116,11 +116,11 @@ export default async function proxy(req: Request, res: Response) {
         const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt') || targetUrl.includes('vixsrc.to/playlist/');
         isSegment = targetUrl.includes('.ts') || targetUrl.includes('.mp4');
 
-        const getProxyHeaders = (url: string) => {
+        const getProxyHeaders = (url: string, altReferer?: string) => {
             const uri = new URL(url);
-            let referer = proxyRef || "https://allmovieland.link/";
+            let referer = altReferer || proxyRef || "https://allmovieland.link/";
 
-            if (!proxyRef) {
+            if (!proxyRef && !altReferer) {
                 if (url.includes('slime') || url.includes('vekna')) {
                     referer = `https://${url.includes('slime') ? 'vekna402las.com' : uri.host}/`;
                 } else if (url.includes('vidsrc')) {
@@ -134,7 +134,7 @@ export default async function proxy(req: Request, res: Response) {
                 } else {
                     referer = `https://${uri.host}/`;
                 }
-            } else {
+            } else if (!altReferer) {
                 try {
                     const proxyHost = new URL(proxyRef).hostname;
                     if (!url.includes(proxyHost)) {
@@ -147,16 +147,20 @@ export default async function proxy(req: Request, res: Response) {
                 }
             }
 
-            if (!referer.endsWith('/')) referer += '/';
-            const origin = referer.replace(/\/$/, '');
+            // CLEAN UP REFERER: trailing slashes only for roots
+            if (referer.startsWith('http') && !referer.includes('movie/') && !referer.includes('tv/') && !referer.includes('playlist/') && !referer.endsWith('/')) {
+                referer += '/';
+            }
+            const origin = referer.split('/').slice(0, 3).join('/');
 
-            // Minimalist headers for VixSrc (to match the successful scraper fetching)
+            // Minimalist headers for VixSrc (to match browser patterns)
             if (url.includes('vixsrc.to')) {
                 return {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
                     "Referer": referer,
-                    "Origin": "https://vixsrc.to",
-                    "Accept": "*/*"
+                    "Accept": "application/x-mpegURL, application/vnd.apple.mpegurl, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Cache-Control": "no-cache"
                 };
             }
 
@@ -176,15 +180,15 @@ export default async function proxy(req: Request, res: Response) {
             };
         };
 
-        const tryFetch = async (useTor: boolean) => {
+        const tryFetch = async (useTor: boolean, altReferer?: string) => {
             return await axios.get(targetUrl, {
-                headers: getProxyHeaders(targetUrl),
+                headers: getProxyHeaders(targetUrl, altReferer),
                 httpAgent: useTor ? torAgent : undefined,
                 httpsAgent: useTor ? torAgent : undefined,
                 responseType: isM3U8 ? 'text' : 'stream',
                 timeout: isSegment ? 20000 : 30000,
                 maxRedirects: 5,
-                validateStatus: () => true // Handle all status codes manually
+                validateStatus: () => true
             });
         };
 
@@ -193,6 +197,12 @@ export default async function proxy(req: Request, res: Response) {
             if (isSegment || targetUrl.includes('vixsrc')) {
                 try {
                     response = await tryFetch(false);
+                    // Special VixSrc Logic: If 403, retry with Google referer (sometimes works better on cloud IPs)
+                    if (response.status === 403 && targetUrl.includes('vixsrc')) {
+                        console.log(`[Proxy Adaptive] VixSrc 403. Retrying with Google referer...`);
+                        response = await tryFetch(false, "https://google.com");
+                    }
+
                     if (response.status >= 400 && response.status !== 404) {
                         console.log(`[Proxy Adaptive] Direct returned ${response.status}. Switching to Tor...`);
                         response = await tryFetch(true);
