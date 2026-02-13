@@ -4,7 +4,7 @@ export async function getPlayerUrl() {
   let baseUrl = (process.env.BASE_URL || 'https://allmovieland.link/player.js').trim();
 
   console.log(`Base URL: ${baseUrl}`);
-  
+
   // Normalize spaces/encoding
   baseUrl = baseUrl.replace(/%2520/g, " ").replace(/%20/g, " ");
 
@@ -22,10 +22,10 @@ export async function getPlayerUrl() {
         timeout: 15000 // Increased timeout for Vercel
       });
       console.log(`Successfully fetched from: ${url}, status: ${res.status}`);
-      
+
       const resText = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
       console.log(`Response length from ${url}: ${resText.length}`);
-      
+
       // Look for multiple possible patterns
       const patterns = [
         /const\s+AwsIndStreamDomain\s*=\s*'([^']+)'/,
@@ -40,25 +40,27 @@ export async function getPlayerUrl() {
         /['"]apiURL['"]\s*[:=]\s*['"]([^'"]+)['"]/,
         /['"]streamURL['"]\s*[:=]\s*['"]([^'"]+)['"]/,
       ];
-      
+
       for (const pattern of patterns) {
         const playerUrlMatch = resText.match(pattern);
         if (playerUrlMatch && playerUrlMatch[1]) {
           const domain = playerUrlMatch[1];
           console.log(`Found player domain with pattern: ${pattern.toString()} - ${domain} from URL: ${url}`);
           // Validate domain format and ensure it's not a known dead one
-          if (domain.startsWith('http') && !domain.includes('protection-episode-i-222.site')) {
+          const isBlacklisted = (d: string) => d.includes('protection-episode-i-222.site') || d.includes('cloudnestra.com');
+
+          if (domain.startsWith('http') && !isBlacklisted(domain)) {
             return domain.endsWith('/') ? domain.slice(0, -1) : domain;
           } else if (!domain.startsWith('http')) {
             // If it doesn't start with http, prepend https
             const fullDomain = `https://${domain}`;
-            if (!fullDomain.includes('protection-episode-i-222.site')) {
+            if (!isBlacklisted(fullDomain)) {
               return fullDomain.endsWith('/') ? fullDomain.slice(0, -1) : fullDomain;
             }
           }
         }
       }
-      
+
       console.log(`No player domain found with any pattern in response from: ${url}`);
       // Log a snippet of the response for debugging
       console.log(`Response snippet: ${resText.substring(0, 500)}...`);
@@ -97,7 +99,7 @@ export async function getPlayerUrl() {
     playerUrl = await tryFetch('https://allmovieland.net/player.js');
     console.log(`Step 5 - Net result: ${playerUrl}`);
   }
-  
+
   if (!playerUrl) {
     playerUrl = await tryFetch('https://allmovieland.tv/player.js');
     console.log(`Step 6 - TV result: ${playerUrl}`);
@@ -108,7 +110,7 @@ export async function getPlayerUrl() {
     playerUrl = await tryFetch('https://allmovieland.cam/player.js');
     console.log(`Step 7 - CAM result: ${playerUrl}`);
   }
-  
+
   if (!playerUrl) {
     playerUrl = await tryFetch('https://allmovieland.skin/player.js');
     console.log(`Step 8 - Skin result: ${playerUrl}`);

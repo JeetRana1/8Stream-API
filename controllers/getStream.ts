@@ -23,13 +23,26 @@ export default async function getStream(req: Request, res: Response) {
       token = parts[0];
       const searchParams = new URLSearchParams(parts[1]);
       proxyRef = decodeURIComponent(searchParams.get('proxy_ref') || "");
+
+      // Blacklist check for proxyRef
+      if (proxyRef.includes('cloudnestra.com') || proxyRef.includes('protection-episode-i-222.site')) {
+        console.log(`[getStream] Ignoring blacklisted proxyRef: ${proxyRef}`);
+        proxyRef = "";
+      }
     }
 
     if (token.startsWith('http')) {
       finalStreamUrl = token;
     } else {
       // New logic: fetch token from mirror
-      const baseDomain = (proxyRef && proxyRef !== '' ? proxyRef : await getPlayerUrl()).replace(/\/$/, '');
+      let baseDomain = (proxyRef && proxyRef !== '' ? proxyRef : await getPlayerUrl()).replace(/\/$/, '');
+
+      // Double check resolved domain
+      if (baseDomain.includes('cloudnestra.com')) {
+        console.log(`[getStream] Resolved domain is blacklisted (cloudnestra.com). Trying to fetch fresh...`);
+        baseDomain = (await getPlayerUrl()).replace(/\/$/, '');
+      }
+
       const path = token.startsWith('~') ? token.slice(1) : token;
       const playlistUrl = `${baseDomain}/playlist/${path}.txt`;
 
