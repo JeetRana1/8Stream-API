@@ -54,10 +54,11 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
         }
 
         if (playlistData && playlistData.url) {
-            const finalUrl = `${playlistData.url}?token=${playlistData.params.token}&expires=${playlistData.params.expires}&proxy_ref=${encodeURIComponent(url)}`;
+            const finalUrl = `${playlistData.url}?token=${playlistData.params.token}&expires=${playlistData.params.expires}`;
             return {
                 success: true,
                 streamUrl: finalUrl,
+                proxyRef: url, // Pass referer separately
                 embedUrl: url, // Fallback for 403s
                 isEmbed: false // Direct manifest
             };
