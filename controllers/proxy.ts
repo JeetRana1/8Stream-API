@@ -171,18 +171,13 @@ export default async function proxy(req: Request, res: Response) {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                     "Referer": referer,
                     "Origin": "https://vixsrc.to",
-                    "Accept": "*/*",
+                    "Accept": "application/x-mpegURL, application/vnd.apple.mpegurl, */*",
                     "Accept-Language": "en-US,en;q=0.9",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                    "Sec-Ch-Ua-Mobile": "?0",
-                    "Sec-Ch-Ua-Platform": '"Windows"',
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "same-origin",
+                    "Connection": "keep-alive",
                     "DNT": "1",
                     "Pragma": "no-cache",
-                    "Cache-Control": "no-cache"
+                    "Cache-Control": "no-cache",
+                    "Accept-Encoding": "identity"
                 };
             }
 
@@ -231,18 +226,11 @@ export default async function proxy(req: Request, res: Response) {
                     }
 
                     if (response.status >= 400 && response.status !== 404) {
-                        // SKIP TOR FOR VIXSRC PLAYLISTS (100% BLOCKED ON TOR)
-                        if (targetUrl.includes('vixsrc.to/playlist/')) {
-                            console.log(`[Proxy Adaptive] VixSrc playlist blocked. Skipping Tor (blocked by provider).`);
-                        } else {
-                            console.log(`[Proxy Adaptive] Direct returned ${response.status}. Switching to Tor...`);
-                            response = await tryFetch(true);
-                        }
+                        console.log(`[Proxy Adaptive] Status ${response.status}. Switching to Tor fallback...`);
+                        response = await tryFetch(true);
                     }
                 } catch (e) {
-                    if (targetUrl.includes('vixsrc.to/playlist/')) {
-                        throw new Error("VixSrc direct blocked and skipping Tor.");
-                    }
+                    console.log(`[Proxy Adaptive] Fetch failed. Trying Tor fallback...`);
                     response = await tryFetch(true);
                 }
             } else {
