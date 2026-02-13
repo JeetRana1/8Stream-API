@@ -4,9 +4,10 @@ import { decrypt } from "./decoders";
 
 export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?: number, episode?: number, baseUrl: string = "https://vidsrc.net") {
     try {
+        const idParam = tmdbId.startsWith("tt") ? "imdb" : "tmdb";
         const embedUrl = type === "movie"
-            ? `${baseUrl}/embed/movie?tmdb=${tmdbId}`
-            : `${baseUrl}/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`;
+            ? `${baseUrl}/embed/movie?${idParam}=${tmdbId}`
+            : `${baseUrl}/embed/tv?${idParam}=${tmdbId}&season=${season}&episode=${episode}`;
 
         console.log(`[scrapeVidsrc] Fetching embed: ${embedUrl} (Base: ${baseUrl})`);
         const res = await axios.get(embedUrl, {

@@ -38,17 +38,14 @@ export default async function mediaInfo(req: Request, res: Response) {
     // Fetch from new providers
     let extraSources: any[] = [];
     try {
-      // We need TMDB ID for the new scrapers
-      const tmdbId = id.toString().startsWith('tt') ? null : id.toString();
-      if (tmdbId) {
-        const { scrapeAll } = require("../lib/scrapers");
-        extraSources = await scrapeAll(
-          tmdbId,
-          (type as any) || 'movie',
-          s ? parseInt(s as string) : undefined,
-          e ? parseInt(e as string) : undefined
-        );
-      }
+      // Trigger scrapers for the resolved ID (works for both TMDB and IMDB)
+      const { scrapeAll } = require("../lib/scrapers");
+      extraSources = await scrapeAll(
+        finalId,
+        (type as any) || 'movie',
+        s ? parseInt(s as string) : undefined,
+        e ? parseInt(e as string) : undefined
+      );
     } catch (e) {
       console.error("[mediaInfo] New scrapers failed:", e);
     }
