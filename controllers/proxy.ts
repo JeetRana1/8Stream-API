@@ -109,8 +109,20 @@ export default async function proxy(req: Request, res: Response) {
     if (!targetUrl) return res.status(400).send("Proxy Error: No URL");
 
     try {
-        // 1. Extract the Referer Hint (passed from getStream or recursive HLS)
-        const proxyRef = req.query.proxy_ref as string;
+        // 1. Extract the Referer Hint (from query or embedded in URL)
+        let proxyRef = req.query.proxy_ref as string;
+
+        if (targetUrl.includes('proxy_ref=')) {
+            try {
+                const urlObj = new URL(targetUrl);
+                const embeddedRef = urlObj.searchParams.get('proxy_ref');
+                if (embeddedRef) {
+                    if (!proxyRef) proxyRef = embeddedRef; // Use embedded if top-level missing
+                    urlObj.searchParams.delete('proxy_ref'); // Clean it up
+                    targetUrl = urlObj.toString();
+                }
+            } catch (e) { }
+        }
 
         // 2. Identify file types and generate smart headers
         const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt') || targetUrl.includes('vixsrc.to/playlist/');

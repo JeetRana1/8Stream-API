@@ -58,6 +58,7 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
             return {
                 success: true,
                 streamUrl: finalUrl,
+                embedUrl: url, // Fallback for 403s
                 isEmbed: false // Direct manifest
             };
         }
