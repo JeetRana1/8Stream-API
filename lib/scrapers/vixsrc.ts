@@ -57,7 +57,8 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
             const finalUrl = `${playlistData.url}?token=${playlistData.params.token}&expires=${playlistData.params.expires}`;
             return {
                 success: true,
-                streamUrl: finalUrl
+                streamUrl: finalUrl,
+                isEmbed: true // Treat as embed
             };
         }
 

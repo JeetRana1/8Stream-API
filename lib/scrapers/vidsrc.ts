@@ -119,7 +119,8 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
                             return {
                                 success: true,
                                 streamUrl: result,
-                                name: server.name
+                                name: server.name,
+                                isEmbed: true // Treat as embed so player uses iframe
                             };
                         }
                     }
@@ -127,7 +128,8 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
                     return {
                         success: true,
                         streamUrl: path,
-                        name: server.name
+                        name: server.name,
+                        isEmbed: true // Treat as embed so player uses iframe
                     };
                 }
             } catch (err: any) {

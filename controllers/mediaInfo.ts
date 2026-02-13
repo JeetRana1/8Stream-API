@@ -44,23 +44,6 @@ export default async function mediaInfo(req: Request, res: Response) {
         (type as any) || 'movie',
         s ? parseInt(s as string) : undefined,
       );
-
-      // Proxy external m3u8 URLs through our backend to bypass Referer checks
-      extraSources = extraSources.map(source => {
-        if (!source.isEmbed && source.streamUrl && source.streamUrl.startsWith('http')) {
-          // Encode the stream URL to pass it safely to our proxy
-          // Our proxy is at /stream/{encodedUrl}
-          const encodedUrl = encodeURIComponent(source.streamUrl);
-          // Use a relative path so it works on any deployment (localhost or koyeb)
-          // The frontend will resolve it against the API base URL
-          return {
-            ...source,
-            // If it's HLS, point to our proxy. If it's an embed, keep it as is.
-            streamUrl: `${req.protocol}://${req.get('host')}/stream/${encodedUrl}`
-          };
-        }
-        return source;
-      });
     } catch (e) {
       console.error("[mediaInfo] New scrapers failed:", e);
     }
