@@ -10,7 +10,9 @@ export function bMGyx71TzQLfdonN(str: string): string {
 export function Iry9MQXnLs(str: string): string {
     const key = "pWB9V)[*4I`nJpp?ozyB~dbr9yt!_n4u";
     let result = "";
-    const decoded = str.match(/.{1,2}/g)!.map(x => String.fromCharCode(parseInt(x, 16))).join("");
+    const matches = str.match(/.{1,2}/g);
+    if (!matches) return "";
+    const decoded = matches.map(x => String.fromCharCode(parseInt(x, 16))).join("");
     for (let i = 0; i < decoded.length; i++) {
         result += String.fromCharCode(
             decoded.charCodeAt(i) ^ key.charCodeAt(i % key.length),
@@ -20,7 +22,11 @@ export function Iry9MQXnLs(str: string): string {
     for (let i = 0; i < result.length; i++) {
         res2 += String.fromCharCode(result.charCodeAt(i) - 3);
     }
-    return Buffer.from(res2, 'base64').toString('utf-8');
+    try {
+        return Buffer.from(res2, 'base64').toString('utf-8');
+    } catch (e) {
+        return res2;
+    }
 }
 
 export function IGLImMhWrI(str: string): string {
@@ -29,7 +35,11 @@ export function IGLImMhWrI(str: string): string {
         return String.fromCharCode(c.charCodeAt(0) + (c.toLowerCase() < "n" ? 13 : -13));
     });
     const final = rot13.split("").reverse().join("");
-    return Buffer.from(final, 'base64').toString('utf-8');
+    try {
+        return Buffer.from(final, 'base64').toString('utf-8');
+    } catch (e) {
+        return final;
+    }
 }
 
 export function GTAxQyTyBx(str: string): string {
@@ -38,13 +48,19 @@ export function GTAxQyTyBx(str: string): string {
     for (let i = 0; i < reversed.length; i += 2) {
         result += reversed[i];
     }
-    return Buffer.from(result, 'base64').toString('utf-8');
+    try {
+        return Buffer.from(result, 'base64').toString('utf-8');
+    } catch (e) {
+        return result;
+    }
 }
 
 export function C66jPHx8qu(str: string): string {
     const reversed = str.split("").reverse().join("");
     const key = "X9a(O;FMV2-7VO5x;Ao :dN1NoFs?j,";
-    const decoded = reversed.match(/.{1,2}/g)!.map(x => String.fromCharCode(parseInt(x, 16))).join("");
+    const matches = reversed.match(/.{1,2}/g);
+    if (!matches) return "";
+    const decoded = matches.map(x => String.fromCharCode(parseInt(x, 16))).join("");
     let result = "";
     for (let i = 0; i < decoded.length; i++) {
         result += String.fromCharCode(

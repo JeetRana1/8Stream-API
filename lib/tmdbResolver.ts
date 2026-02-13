@@ -151,7 +151,10 @@ export async function resolveImdbToTmdb(id: string, type: 'movie' | 'tv' = 'movi
             });
 
             // The final URL should be something like https://www.themoviedb.org/tv/79744-the-rookie
-            const finalUrl = (scrapeRes.request as any).res.responseUrl || scrapeRes.config.url; // axios stores final URL here?
+            let finalUrl = scrapeRes.config.url || "";
+            if (scrapeRes.request && (scrapeRes.request as any).res && (scrapeRes.request as any).res.responseUrl) {
+                finalUrl = (scrapeRes.request as any).res.responseUrl;
+            }
             // Actually in axios standard response.request.res.responseUrl works in node
             // But let's check content too just in case
 

@@ -32,9 +32,8 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
             "malocacomals.com"
         ];
 
-        // Exception: vidsrc-embed.ru OFTEN uses cloudnestra, and users report it works.
-        // So if baseUrl is vidsrc-embed.ru, allows cloudnestra.
-        const allowCloudnestra = baseUrl.includes("vidsrc-embed.ru") || baseUrl.includes("vidsrc-embed.su") || baseUrl.includes("vsrc.su");
+        // Exception: vidsrc.net and mirrors often use cloudnestra
+        const allowCloudnestra = baseUrl.includes("vidsrc.net") || baseUrl.includes("vidsrc-embed.ru") || baseUrl.includes("vidsrc-embed.su") || baseUrl.includes("vsrc.su");
 
         const isBlacklisted = blacklistedDomains.some(domain => {
             if (allowCloudnestra && domain === "cloudnestra.com") return false;
@@ -139,35 +138,54 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
                     });
 
                     const jsCode = jsRes.data;
+                    console.log(`[scrapeVidsrc] Found JS on cloudnestra, checking for decryption...`);
                     const decryptRegex = /{}\}window\[([^"]+)\("([^"]+)"\)/;
                     const match = jsCode.match(decryptRegex);
 
                     if (match) {
                         const funcName = match[1].replace(/['"]/g, '').trim();
                         const key = match[2].trim();
+                        console.log(`[scrapeVidsrc] Using decrypt function: ${funcName}`);
 
                         const $$ = cheerio.load(prorcpHtml);
                         const id = decrypt(key, funcName);
-                        if (!id) continue;
+                        if (!id) {
+                            console.log(`[scrapeVidsrc] Decrypt(key, func) failed to return an ID`);
+                            continue;
+                        }
 
                         const divData = $$(`#${id}`).text();
+                        if (!divData) {
+                            console.log(`[scrapeVidsrc] Could not find div #${id} in prorcp HTML`);
+                            const allDivs: string[] = [];
+                            $$('div').each((_, el) => {
+                                const divId = $$(el).attr('id');
+                                if (divId) allDivs.push(divId);
+                            });
+                            console.log(`[scrapeVidsrc] Available div IDs: ${allDivs.join(', ')}`);
+                            continue;
+                        }
+
                         const result = decrypt(divData, key);
+                        console.log(`[scrapeVidsrc] Decrypted result (first 50 chars): ${result ? result.substring(0, 50) : 'null'}`);
 
                         if (result) {
+                            const isStream = result.includes(".m3u8") || result.includes(".mp4");
                             return {
                                 success: true,
                                 streamUrl: result,
                                 name: server.name,
-                                isEmbed: true // Treat as embed so player uses iframe
+                                isEmbed: !isStream
                             };
                         }
                     }
                 } else if (path.startsWith("http")) {
+                    const isStream = path.includes(".m3u8") || path.includes(".mp4");
                     return {
                         success: true,
                         streamUrl: path,
                         name: server.name,
-                        isEmbed: true // Treat as embed so player uses iframe
+                        isEmbed: !isStream
                     };
                 }
             } catch (err: any) {
@@ -175,7 +193,14 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
             }
         }
 
-        return { success: false, message: "Failed to extract from any server" };
+        // Final fallback: If extraction failed but the embed exists, return the embed URL itself
+        console.log(`[scrapeVidsrc] All extractions failed for ${baseUrl}, returning base embed URL as fallback`);
+        return {
+            success: true,
+            streamUrl: embedUrl,
+            name: baseUrl.includes("vidsrc-embed") ? "VidSrcMe" : "VidSrc",
+            isEmbed: true
+        };
     } catch (error: any) {
         console.error(`[scrapeVidsrc] Failed to scrape ${baseUrl}: ${error.message}`, error.response ? error.response.status : '');
         return { success: false, message: error.message };

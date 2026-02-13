@@ -22,8 +22,8 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
         for (const script of scripts) {
             const content = $(script).html() || '';
             if (content.includes('window.masterPlaylist')) {
-                // Extract using regex
-                const match = content.match(/window\.masterPlaylist\s*=\s*({[\s\S]*?});/);
+                // Extract using regex - more flexible about the ending ;
+                const match = content.match(/window\.masterPlaylist\s*=\s*({[\s\S]*?})(\s+window|\s*$|;)/);
                 if (match && match[1]) {
                     try {
                         // Attempt to parse loosely
@@ -58,11 +58,20 @@ export async function scrapeVixsrc(tmdbId: string, type: 'movie' | 'tv', season?
             return {
                 success: true,
                 streamUrl: finalUrl,
-                isEmbed: true // Treat as embed
+                isEmbed: false // Direct manifest
             };
         }
 
-        return { success: false, message: 'Playlist data not found in page source' };
+        // If we reached here, we didn't find the master playlist. 
+        // But the page exists (200 OK), so return the page itself as an embed.
+        // This is much more reliable as the player handles iframes well.
+        console.log(`[scrapeVixsrc] Falling back to embed URL for ${url}`);
+        return {
+            success: true,
+            streamUrl: url,
+            isEmbed: true,
+            name: 'VixSrc'
+        };
     } catch (e: any) {
         console.error(`[scrapeVixsrc] Error: ${e.message}`, e.response ? e.response.status : '');
         return { success: false, message: e.message };
