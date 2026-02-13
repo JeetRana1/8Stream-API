@@ -1,7 +1,6 @@
 import { Request, Response } from "express";
 import getInfo from "../lib/getInfo";
 import { resolveTmdbToImdb } from "../lib/tmdbResolver";
-import { getMapplUrl } from "../lib/mappl";
 import cache from "../lib/cache";
 import { scrapeAll } from "../lib/scrapers";
 
@@ -50,18 +49,9 @@ export default async function mediaInfo(req: Request, res: Response) {
       console.error("[mediaInfo] New scrapers failed:", e);
     }
 
-    // Generate Mappl URL as an additional source
-    const mapplUrl = getMapplUrl(
-      finalId,
-      (type as any) || 'movie',
-      s ? parseInt(s as string) : undefined,
-      e ? parseInt(e as string) : undefined
-    );
-
     // Combine data
     const enhancedData = {
       ...data,
-      mappl: mapplUrl,
       extraSources: extraSources,
       source: "8stream"
     };
@@ -76,19 +66,17 @@ export default async function mediaInfo(req: Request, res: Response) {
       enhancedData.success = true; // Mark as success if we found anything
       cache.set(cacheKey, enhancedData, 30 * 60 * 1000);
     } else {
-      // Even if primary source fails, return mappl as a backup
-      const backupData = {
-        success: true,
+      // Return unsuccessful response if nothing found
+      const emptyData = {
+        success: false,
         data: {
           playlist: [],
           key: ""
         },
-        mappl: mapplUrl,
         extraSources: [],
-        source: "mappl.tv"
+        source: "8stream"
       };
-      cache.set(cacheKey, backupData, 5 * 60 * 1000);
-      return res.json(backupData);
+      return res.json(emptyData);
     }
 
     res.json(enhancedData);
