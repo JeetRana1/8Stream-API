@@ -8,7 +8,19 @@ const torAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
 export default async function getInfo(id: string) {
   try {
     const playerUrl = await getPlayerUrl();
-    const paths = [`/play/${id}`, `/v/${id}`, `/watch/${id}`];
+
+    // Expand candidate paths to handle various provider structures
+    const paths = [
+      `/play/${id}`,
+      `/v/${id}`,
+      `/watch/${id}`,
+      `/play/tv/${id}`,
+      `/play/movie/${id}`,
+      `/embed/${id}`,
+      `/embed/tv/${id}`,
+      `/embed/movie/${id}`
+    ];
+
 
     let lastError: any = null;
 
@@ -16,7 +28,7 @@ export default async function getInfo(id: string) {
       const targetUrl = `${playerUrl.replace(/\/$/, '')}${path}`;
       console.log(`[getInfo] Trying path: ${targetUrl}`);
 
-      const referers = ["https://allmovieland.link/", "https://google.com/"];
+      const referers = ["https://allmovieland.link/", "https://allmovieland.io/", "https://google.com/"];
 
       for (const referer of referers) {
         try {

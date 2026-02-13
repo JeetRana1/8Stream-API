@@ -1,6 +1,8 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import router from "./routes/route";
 import rateLimit from "express-rate-limit";
 import cache from "./lib/cache";
@@ -15,7 +17,6 @@ app.use(
     methods: ["GET", "POST", "PUT", "DELETE"],
   })
 );
-dotenv.config();
 app.use(express.json());
 
 // Temporarily disabling rate limiter to avoid proxy issues on Vercel
@@ -35,7 +36,7 @@ app.get("/", (req, res) => {
 app.get("/admin/clear-cache", (req, res) => {
   const adminKey = process.env.ADMIN_KEY || "admin123"; // Default key for development
   const providedKey = req.query.key as string;
-  
+
   if (providedKey === adminKey) {
     cache.clear();
     res.json({ success: true, message: "Cache cleared successfully" });

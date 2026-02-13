@@ -21,9 +21,13 @@ export async function resolveTmdbToImdb(id: string, type: 'movie' | 'tv' = 'movi
 
     try {
         // Use the official TMDB API with API key from environment variables
-        const apiKey = process.env.TMDB_API_KEY || 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4YmVjZTUzZGE1NjM4MjA5M2QwMjMwYzA1Zjg4YzlhMCIsInN1YiI6IjY1NmM0MjcxNjVmMzQzMDE0MzRhMzdhNSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.jV5CJmGBbqN2J5o2M9Q49s5Q7jY7Q7Q7Q7Q7Q7Q7Q7Q'; // Public API key - should be replaced with your own
+        const apiKey = process.env.TMDB_API_KEY;
+        if (!apiKey) {
+            console.warn('[TMDB Resolver] TMDB_API_KEY is not set in environment variables.');
+            throw new Error('Missing TMDB_API_KEY');
+        }
+
         const url = `https://api.themoviedb.org/3/${type}/${id}?api_key=${apiKey}&language=en-US`;
-        
         const response = await axios.get(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
@@ -34,10 +38,10 @@ export async function resolveTmdbToImdb(id: string, type: 'movie' | 'tv' = 'movi
         const data = response.data;
         if (data.imdb_id) {
             console.log(`[TMDB Resolver] Successfully converted ${id} -> ${data.imdb_id}`);
-            
+
             // Cache the result for 24 hours
             cache.set(cacheKey, data.imdb_id, 24 * 60 * 60 * 1000);
-            
+
             return data.imdb_id;
         }
 
@@ -45,7 +49,7 @@ export async function resolveTmdbToImdb(id: string, type: 'movie' | 'tv' = 'movi
         return id; // Return original and hope for the best
     } catch (e: any) {
         console.log(`[TMDB Resolver] API conversion failed: ${e.message}`);
-        
+
         // Fallback to scraping method if API fails
         try {
             console.log('[TMDB Resolver] Falling back to scraping method...');
@@ -64,10 +68,10 @@ export async function resolveTmdbToImdb(id: string, type: 'movie' | 'tv' = 'movi
             if (match && match[1]) {
                 const imdbId = match[1];
                 console.log(`[TMDB Resolver] Successfully converted ${id} -> ${imdbId} via scraping`);
-                
+
                 // Cache the result for 24 hours
                 cache.set(cacheKey, imdbId, 24 * 60 * 60 * 1000);
-                
+
                 return imdbId;
             }
 
@@ -77,10 +81,10 @@ export async function resolveTmdbToImdb(id: string, type: 'movie' | 'tv' = 'movi
                 if (tvMatch) {
                     const imdbId = tvMatch[1];
                     console.log(`[TMDB Resolver] Successfully converted ${id} -> ${imdbId} via scraping (TV)`);
-                    
+
                     // Cache the result for 24 hours
                     cache.set(cacheKey, imdbId, 24 * 60 * 60 * 1000);
-                    
+
                     return imdbId;
                 }
             }
@@ -107,7 +111,11 @@ export async function resolveImdbToTmdb(imdbId: string, type: 'movie' | 'tv' = '
     }
 
     try {
-        const apiKey = process.env.TMDB_API_KEY || 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4YmVjZTUzZGE1NjM4MjA5M2QwMjMwYzA1Zjg4YzlhMCIsInN1YiI6IjY1NmM0MjcxNjVmMzQzMDE0MzRhMzdhNSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.jV5CJmGBbqN2J5o2M9Q49s5Q7jY7Q7Q7Q7Q7Q7Q7Q7Q';
+        const apiKey = process.env.TMDB_API_KEY;
+        if (!apiKey) {
+            console.warn('[TMDB Resolver] TMDB_API_KEY is not set in environment variables.');
+            throw new Error('Missing TMDB_API_KEY');
+        }
         const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${apiKey}&external_source=imdb_id`;
         const response = await axios.get(url, {
             headers: {
