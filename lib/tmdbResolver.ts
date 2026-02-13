@@ -134,9 +134,39 @@ export async function resolveImdbToTmdb(id: string, type: 'movie' | 'tv' = 'movi
         }
 
         console.log(`[TMDB Resolver] Could not find TMDB ID for ${id}.`);
-        return id;
+        throw new Error("API resolution returned no results"); // Throw to trigger fallback
     } catch (e: any) {
         console.log(`[TMDB Resolver] API conversion failed: ${e.message}`);
+
+        // Fallback: Scrape TMDb redirect
+        console.log('[TMDB Resolver] Falling back to redirect scraping method...');
+        try {
+            const redirectUrl = `https://www.themoviedb.org/redirect?external_source=imdb_id&external_id=${id}`;
+            const scrapeRes = await axios.get(redirectUrl, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                },
+                timeout: 10000,
+                maxRedirects: 5
+            });
+
+            // The final URL should be something like https://www.themoviedb.org/tv/79744-the-rookie
+            const finalUrl = (scrapeRes.request as any).res.responseUrl || scrapeRes.config.url; // axios stores final URL here?
+            // Actually in axios standard response.request.res.responseUrl works in node
+            // But let's check content too just in case
+
+            const urlMatch = finalUrl.match(/\/(movie|tv)\/(\d+)/);
+            if (urlMatch && urlMatch[2]) {
+                const tmdbId = urlMatch[2];
+                console.log(`[TMDB Resolver] Successfully converted ${id} -> ${tmdbId} via redirect scraping`);
+                cache.set(cacheKey, tmdbId, 24 * 60 * 60 * 1000);
+                return tmdbId;
+            }
+
+        } catch (scrapeErr: any) {
+            console.log(`[TMDB Resolver] Redirect scraping failed: ${scrapeErr.message}`);
+        }
+
         return id;
     }
 }
