@@ -186,7 +186,7 @@ export default async function proxy(req: Request, res: Response) {
             });
         };
 
-        let response;
+        let response: any;
         try {
             if (isSegment || targetUrl.includes('vixsrc')) {
                 try {
