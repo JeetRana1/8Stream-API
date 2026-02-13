@@ -97,7 +97,7 @@ app.use("/api/v1", router);
 const Port = process.env.PORT || 7860;
 
 app.listen(Port, () => {
-  console.log(`Server running on port ${Port}`);
+  console.log(`Server running on port ${Port} (v3 - Direct Fallback enabled)`);
 });
 
 export default app;

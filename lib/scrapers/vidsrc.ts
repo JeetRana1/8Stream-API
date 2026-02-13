@@ -23,7 +23,12 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
 
         // Find the iframe to get the source domain (BASEDOM)
         const iframeSrc = $("iframe").attr("src") || "";
-        const baseDom = iframeSrc.startsWith("//") ? "https:" + iframeSrc : iframeSrc;
+        let baseDom = iframeSrc.startsWith("//") ? "https:" + iframeSrc : iframeSrc;
+
+        if (baseDom.includes("cloudnestra.com") || baseDom.includes("protection-episode-i-222.site")) {
+            console.log(`[scrapeVidsrc] Base domain ${baseDom} is blacklisted.`);
+            baseDom = ""; // Invalidate it
+        }
         let origin = "";
         try {
             origin = baseDom ? new URL(baseDom).origin : "";
