@@ -66,10 +66,17 @@ export default async function getStream(req: Request, res: Response) {
             httpAgent: mode.agent,
             httpsAgent: mode.agent,
             timeout: 15000,
+            validateStatus: (status) => status < 500 // Accept any non-5xx status
           });
-          if (response.status === 200) {
+
+          console.log(`[getStream] ${mode.name} response status: ${response.status}, data type: ${typeof response.data}`);
+
+          if (response.status === 200 && response.data && typeof response.data === 'string') {
             console.log(`[getStream] Success via ${mode.name}`);
             break;
+          } else {
+            console.log(`[getStream] ${mode.name} returned invalid data (status ${response.status})`);
+            response = undefined; // Invalidate this response
           }
         } catch (e: any) {
           console.log(`[getStream] Failed via ${mode.name}: ${e.message}`);
@@ -81,9 +88,11 @@ export default async function getStream(req: Request, res: Response) {
       if (!response) throw new Error("Failed to fetch stream from mirror");
 
       finalStreamUrl = response.data;
+      console.log(`[getStream] Received data type: ${typeof finalStreamUrl}, value: ${JSON.stringify(finalStreamUrl).substring(0, 200)}`);
     }
 
     if (!finalStreamUrl || typeof finalStreamUrl !== 'string' || !finalStreamUrl.startsWith('http')) {
+      console.error(`[getStream] Invalid stream URL. Type: ${typeof finalStreamUrl}, Value: ${JSON.stringify(finalStreamUrl)}`);
       return res.status(500).json({ success: false, message: "Invalid stream URL received from mirror" });
     }
 
