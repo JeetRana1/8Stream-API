@@ -3,6 +3,7 @@ import getInfo from "../lib/getInfo";
 import { resolveTmdbToImdb } from "../lib/tmdbResolver";
 import { getMapplUrl } from "../lib/mappl";
 import cache from "../lib/cache";
+import { scrapeAll } from "../lib/scrapers";
 
 export default async function mediaInfo(req: Request, res: Response) {
   let { id, type, s, e } = req.query;
@@ -34,6 +35,24 @@ export default async function mediaInfo(req: Request, res: Response) {
     // Fetch primary stream info (8Stream/AllMovieLand)
     const data = await getInfo(finalId);
 
+    // Fetch from new providers
+    let extraSources: any[] = [];
+    try {
+      // We need TMDB ID for the new scrapers
+      const tmdbId = id.toString().startsWith('tt') ? null : id.toString();
+      if (tmdbId) {
+        const { scrapeAll } = require("../lib/scrapers");
+        extraSources = await scrapeAll(
+          tmdbId,
+          (type as any) || 'movie',
+          s ? parseInt(s as string) : undefined,
+          e ? parseInt(e as string) : undefined
+        );
+      }
+    } catch (e) {
+      console.error("[mediaInfo] New scrapers failed:", e);
+    }
+
     // Generate Mappl URL as an additional source
     const mapplUrl = getMapplUrl(
       finalId,
@@ -46,14 +65,19 @@ export default async function mediaInfo(req: Request, res: Response) {
     const enhancedData = {
       ...data,
       mappl: mapplUrl,
-      source: "mappl.tv"
+      extraSources: extraSources,
+      source: "8stream"
     };
 
-    console.log(`Response data (enhanced with Mappl):`, enhancedData);
+    console.log(`Response data (enhanced):`, {
+      success: enhancedData.success,
+      extraSourcesCount: extraSources.length
+    });
 
-    // Cache the result if successful
-    if (data.success) {
-      cache.set(cacheKey, enhancedData, 30 * 60 * 1000); // Cache successful results for 30 minutes
+    // Cache the result if successful or if we have extra sources
+    if (data.success || extraSources.length > 0) {
+      enhancedData.success = true; // Mark as success if we found anything
+      cache.set(cacheKey, enhancedData, 30 * 60 * 1000);
     } else {
       // Even if primary source fails, return mappl as a backup
       const backupData = {
@@ -63,6 +87,7 @@ export default async function mediaInfo(req: Request, res: Response) {
           key: ""
         },
         mappl: mapplUrl,
+        extraSources: [],
         source: "mappl.tv"
       };
       cache.set(cacheKey, backupData, 5 * 60 * 1000);
