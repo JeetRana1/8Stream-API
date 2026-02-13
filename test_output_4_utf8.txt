@@ -1,0 +1,50 @@
+﻿--- Testing ID Resolution ---
+Resolving tt7587890...
+[TMDB Resolver] Detected IMDB ID: tt7587890. Converting to TMDB...
+[TMDB Resolver] API conversion failed: Request failed with status code 401
+[TMDB Resolver] Falling back to redirect scraping method...
+[TMDB Resolver] Successfully converted tt7587890 -> 79744 via redirect scraping
+Result: 79744
+MATCH! Resolution works via scraping.
+
+--- Testing VixSrc Scraper ---
+Scraping VixSrc with ID 79744...
+[scrapeVixsrc] Fetching: https://vixsrc.to/tv/79744/1/1
+[scrapeVixsrc] Falling back to embed URL for https://vixsrc.to/tv/79744/1/1
+VixSrc Result: {
+  success: true,
+  streamUrl: 'https://vixsrc.to/tv/79744/1/1',
+  isEmbed: true,
+  name: 'VixSrc'
+}
+
+--- Testing VidSrc.net (Primary) ---
+[scrapeVidsrc] Fetching embed: https://vidsrc.net/embed/tv?imdb=tt7587890&season=1&episode=1 (Base: https://vidsrc.net)
+[scrapeVidsrc] No servers found via selector. Trying regex fallback...
+[scrapeVidsrc] Found 3 servers on https://vidsrc.net
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] All extractions failed for https://vidsrc.net, returning base embed URL as fallback
+VidSrc.net: true undefined
+Stream URL: https://vidsrc.net/embed/tv?imdb=tt7587890&season=1&episode=1
+
+--- Testing VidSrcMe (RU) ---
+[scrapeVidsrc] Fetching embed: https://vidsrc-embed.ru/embed/tv?imdb=tt7587890&season=1&episode=1 (Base: https://vidsrc-embed.ru)
+[scrapeVidsrc] No servers found via selector. Trying regex fallback...
+[scrapeVidsrc] Found 3 servers on https://vidsrc-embed.ru
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] All extractions failed for https://vidsrc-embed.ru, returning base embed URL as fallback
+VidSrcMe RU: true undefined
+
+--- Testing VidSrcMe (SU) ---
+[scrapeVidsrc] Fetching embed: https://vidsrc-embed.su/embed/tv?imdb=tt7587890&season=1&episode=1 (Base: https://vidsrc-embed.su)
+[scrapeVidsrc] No servers found via selector. Trying regex fallback...
+[scrapeVidsrc] Found 3 servers on https://vidsrc-embed.su
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] Trying server: VidSrc Server on https://cloudnestra.com
+[scrapeVidsrc] All extractions failed for https://vidsrc-embed.su, returning base embed URL as fallback
+VidSrcMe SU: true undefined

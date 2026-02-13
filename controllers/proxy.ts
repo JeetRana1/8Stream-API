@@ -148,14 +148,27 @@ export default async function proxy(req: Request, res: Response) {
     if (!targetUrl) return res.status(400).send("Proxy Error: No URL");
 
     try {
-        // 1. Extract the Referer Hint (passed from getStream or recursive HLS)
-        const proxyRef = req.query.proxy_ref as string;
+        // 1. Extract the Referer Hint (from query or embedded in URL)
+        let proxyRef = req.query.proxy_ref as string;
+
+        if (targetUrl.includes('proxy_ref=')) {
+            try {
+                const urlObj = new URL(targetUrl);
+                const embeddedRef = urlObj.searchParams.get('proxy_ref');
+                if (embeddedRef) {
+                    if (!proxyRef) proxyRef = embeddedRef; // Use embedded if top-level missing
+                    urlObj.searchParams.delete('proxy_ref'); // Clean it up
+                    targetUrl = urlObj.toString();
+                }
+            } catch (e) { }
+        }
 
         // 2. Identify file types and generate smart headers
-        const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt');
+        const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt') || targetUrl.includes('vixsrc.to/playlist/');
         isSegment = targetUrl.includes('.ts') || targetUrl.includes('.mp4');
         const manifestCacheKey = `${targetUrl}|${String(req.query.proxy_ref || "")}`;
 
+<<<<<<< HEAD
         // Fast-path cached rewritten manifest to reduce repeated upstream fetches.
         if (isM3U8) {
             const cachedManifest = manifestResponseCache.get(manifestCacheKey);
@@ -177,17 +190,27 @@ export default async function proxy(req: Request, res: Response) {
 
             if (!refererOverride && !proxyRef) {
                 // Dynamic Referer Intelligence (Fallback only)
+=======
+        const getProxyHeaders = (url: string, altReferer?: string) => {
+            const uri = new URL(url);
+            let referer = altReferer || proxyRef || "https://allmovieland.link/";
+
+            if (!proxyRef && !altReferer) {
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
                 if (url.includes('slime') || url.includes('vekna')) {
                     referer = `https://${url.includes('slime') ? 'vekna402las.com' : uri.host}/`;
                 } else if (url.includes('vidsrc')) {
                     referer = "https://vidsrc.me/";
                 } else if (url.includes('vidlink')) {
                     referer = "https://vidlink.pro/";
+                } else if (url.includes('vixsrc.to')) {
+                    referer = "https://vixsrc.to/";
                 } else if (url.includes('superembed')) {
                     referer = "https://superembed.stream/";
                 } else {
                     referer = `https://${uri.host}/`;
                 }
+<<<<<<< HEAD
             } else {
                 // Trust explicit upstream hint from getStream/manifest rewriting.
                 try {
@@ -198,12 +221,22 @@ export default async function proxy(req: Request, res: Response) {
                         referer = `https://${uri.host}/`;
                     } else {
                         referer = proxyRefUrl.href;
+=======
+            } else if (!altReferer) {
+                try {
+                    const proxyHost = new URL(proxyRef).hostname;
+                    if (!url.includes(proxyHost)) {
+                        referer = url.includes('vixsrc.to') ? (proxyRef || "https://vixsrc.to/") : `https://${uri.host}/`;
+                    } else {
+                        referer = proxyRef;
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
                     }
                 } catch (e) {
-                    referer = `https://${uri.host}/`;
+                    referer = url.includes('vixsrc.to') ? "https://vixsrc.to/" : `https://${uri.host}/`;
                 }
             }
 
+<<<<<<< HEAD
             let origin = `https://${uri.host}`;
             try {
                 origin = new URL(referer).origin;
@@ -213,6 +246,29 @@ export default async function proxy(req: Request, res: Response) {
             }
 
             const jarCookie = getJarCookie(proxyRef);
+=======
+            // CLEAN UP REFERER: trailing slashes only for roots
+            if (referer.startsWith('http') && !referer.includes('movie/') && !referer.includes('tv/') && !referer.includes('playlist/') && !referer.endsWith('/')) {
+                referer += '/';
+            }
+            const origin = referer.split('/').slice(0, 3).join('/');
+
+            // Minimalist headers for VixSrc (to match browser patterns)
+            if (url.includes('vixsrc.to')) {
+                return {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Referer": referer,
+                    "Origin": "https://vixsrc.to",
+                    "Accept": "application/x-mpegURL, application/vnd.apple.mpegurl, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Connection": "keep-alive",
+                    "DNT": "1",
+                    "Pragma": "no-cache",
+                    "Cache-Control": "no-cache",
+                    "Accept-Encoding": "identity"
+                };
+            }
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
 
             return {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -226,6 +282,7 @@ export default async function proxy(req: Request, res: Response) {
                 "Sec-Fetch-Site": "cross-site",
                 "DNT": "1",
                 "Pragma": "no-cache",
+<<<<<<< HEAD
                 "Cache-Control": "no-cache",
                 "Host": uri.host,
                 ...(jarCookie ? { "Cookie": jarCookie } : {})
@@ -240,25 +297,49 @@ export default async function proxy(req: Request, res: Response) {
                 httpsAgent: useTor ? torAgent : undefined,
                 responseType: isM3U8 ? 'text' : 'stream',
                 timeout: isSegment ? 20000 : manifestTimeoutMs,
+=======
+                "Cache-Control": "no-cache"
+            };
+        };
+
+        const tryFetch = async (useTor: boolean, altReferer?: string) => {
+            return await axios.get(targetUrl, {
+                headers: getProxyHeaders(targetUrl, altReferer),
+                httpAgent: useTor ? torAgent : undefined,
+                httpsAgent: useTor ? torAgent : undefined,
+                responseType: isM3U8 ? 'text' : 'stream',
+                timeout: isSegment ? 20000 : 30000,
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
                 maxRedirects: 5,
-                validateStatus: (status) => status < 400 // Only count 2xx/3xx as success
+                validateStatus: () => true
             });
         };
 
-        let response;
+        let response: any;
         try {
+<<<<<<< HEAD
             // Priority for segments: Try Direct FIRST for speed, then Tor Fallback
             // But if we detect a 403 (Block), we fail-fast to Tor to save time
             const preferTor = shouldPreferTor(targetUrl);
             if (isSegment) {
                 try {
                     // Segments should stay direct-first for throughput; Tor fallback only if needed.
+=======
+            if (isSegment || targetUrl.includes('vixsrc')) {
+                try {
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
                     response = await tryFetch(false);
-                } catch (e: any) {
-                    // If blocked (403), immediately switch to Tor
-                    if (e.message.includes('403') || e.message.includes('401')) {
-                        console.log(`[Proxy Adaptive] Direct blocked (${e.message}). Switching to Tor lane...`);
+                    // Special VixSrc Multi-Step Adaptive Logic
+                    if (response.status === 403 && targetUrl.includes('vixsrc')) {
+                        console.log(`[Proxy Adaptive] VixSrc 403. Attempting root referer...`);
+                        response = await tryFetch(false, "https://vixsrc.to/");
+
+                        if (response.status === 403) {
+                            console.log(`[Proxy Adaptive] VixSrc 403. Attempting Google fallback...`);
+                            response = await tryFetch(false, "https://google.com");
+                        }
                     }
+<<<<<<< HEAD
                     try {
                         response = await tryFetch(true);
                     } catch (torErr: any) {
@@ -363,17 +444,44 @@ export default async function proxy(req: Request, res: Response) {
                         console.log(`[Proxy Fallback] Direct failed for manifest. Trying Tor...`);
                         response = await tryFetch(true);
                     }
+=======
+
+                    if (response.status >= 400 && response.status !== 404) {
+                        console.log(`[Proxy Adaptive] Status ${response.status}. Switching to Tor fallback...`);
+                        response = await tryFetch(true);
+                    }
+                } catch (e) {
+                    console.log(`[Proxy Adaptive] Fetch failed. Trying Tor fallback...`);
+                    response = await tryFetch(true);
+                }
+            } else {
+                try {
+                    response = await tryFetch(true);
+                    if (response.status >= 400 && response.status !== 404) {
+                        response = await tryFetch(false);
+                    }
+                } catch (e) {
+                    response = await tryFetch(false);
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
                 }
             }
         } catch (finalErr: any) {
             throw finalErr;
         }
 
+<<<<<<< HEAD
         if (!response) {
             throw new Error("Proxy fetch failed: empty upstream response");
         }
 
         // Set permissive CORS
+=======
+        if (response.status >= 400) {
+            console.error(`[Proxy Fatal] Target returned ${response.status} for ${targetUrl}`);
+            return res.status(response.status).send(`Target returned error ${response.status}`);
+        }
+
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
         res.setHeader("Access-Control-Allow-Headers", "*");
@@ -381,21 +489,14 @@ export default async function proxy(req: Request, res: Response) {
 
         let contentType = response.headers["content-type"];
 
-        // 3. Recursive HLS Rewriting (Manifests)
         if (isM3U8 || (contentType && (contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL')))) {
-            console.log(`[Proxy Manifest] Rewriting: ${targetUrl.substring(0, 60)}...`);
-
             let content = "";
             if (typeof response.data === 'string') {
                 content = response.data;
             } else if (Buffer.isBuffer(response.data)) {
                 content = response.data.toString('utf-8');
-            } else if (typeof response.data === 'object') {
-                try {
-                    content = JSON.stringify(response.data);
-                } catch (e) {
-                    content = ""; // Fallback for circular/stream objects
-                }
+            } else {
+                content = "";
             }
 
             if (!content.includes('#EXTM3U') && !targetUrl.includes('.txt')) {
@@ -405,6 +506,7 @@ export default async function proxy(req: Request, res: Response) {
             res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
             res.setHeader("Cache-Control", "public, max-age=6");
             const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+<<<<<<< HEAD
             const setCookieHeader = response.headers["set-cookie"] as string[] | undefined;
             const cookieHeader = extractCookieHeader(setCookieHeader);
             if (cookieHeader) {
@@ -417,27 +519,15 @@ export default async function proxy(req: Request, res: Response) {
             // Sustain the referer through recursive quality tracks and segments
             // Pass the current manifest URL as parent referer for next-level requests.
             const refParam = `&proxy_ref=${encodeURIComponent(targetUrl)}`;
+=======
+            const refParam = proxyRef ? `&proxy_ref=${encodeURIComponent(proxyRef)}` : "";
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
 
             const rewrittenLines = content.split('\n').map(line => {
                 const trimmed = line.trim();
-                if (!trimmed) return line;
-
-                // 3a. Handle Quality/Audio Variant Manifests (URI="...")
-                if (trimmed.includes('URI="')) {
-                    return trimmed.replace(/URI="([^"]+)"/g, (match, relUrl) => {
-                        const absUrl = relUrl.startsWith('http') ? relUrl : new URL(relUrl, baseUrl).href;
-                        return `URI="${proxyBase}${encodeURIComponent(absUrl)}${refParam}"`;
-                    });
-                }
-
-                // 3b. Handle Fragmented Video Segments (.ts) or Sub-Manifests
-                // CRITICAL: Filter out garbage lines like "7" or non-file lines
-                if (!trimmed.startsWith('#') && (trimmed.includes('/') || trimmed.includes('.ts') || trimmed.includes('.m3u8') || trimmed.length > 5)) {
-                    const absUrl = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
-                    return `${proxyBase}${encodeURIComponent(absUrl)}${refParam}`;
-                }
-
-                return line;
+                if (!trimmed || trimmed.startsWith('#')) return line;
+                const absUrl = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
+                return `${proxyBase}${encodeURIComponent(absUrl)}${refParam}`;
             });
 
             const rewrittenManifest = rewrittenLines.join('\n');
@@ -448,19 +538,29 @@ export default async function proxy(req: Request, res: Response) {
             return res.send(rewrittenManifest);
         }
 
-        // 4. Handle Binary/Segment Data (Piping)
         res.setHeader("Content-Type", contentType || (isSegment ? "video/mp2t" : "application/octet-stream"));
+<<<<<<< HEAD
         if (isSegment) {
             res.setHeader("Cache-Control", "public, max-age=60");
         }
 
         // Ensure accurate content length if provided
+=======
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
         if (response.headers["content-length"]) {
             res.setHeader("Content-Length", response.headers["content-length"]);
         }
 
+        // Cleanup stream on close to prevent "crashing" (OOM/leaks)
+        res.on('close', () => {
+            if (response.data && typeof response.data.destroy === 'function') {
+                response.data.destroy();
+            }
+        });
+
         response.data.pipe(res);
 
+<<<<<<< HEAD
         } catch (error: any) {
             // Only log fatal errors for manifests (crucial for debugging)
             // Silence segment errors as they are retried or handled by the player
@@ -470,8 +570,12 @@ export default async function proxy(req: Request, res: Response) {
                 console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
             }
 
+=======
+    } catch (error: any) {
+        console.error(`[Proxy Exception] ${error.message} for ${targetUrl}`);
+>>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
         if (!res.headersSent) {
-            res.status(500).send("Proxy connectivity issues. Please try refreshing.");
+            res.status(500).send("Proxy error: " + error.message);
         }
     }
 }
