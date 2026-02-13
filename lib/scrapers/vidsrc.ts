@@ -143,7 +143,7 @@ export async function scrapeVidsrc(tmdbId: string, type: "movie" | "tv", season?
         }
 
         // Final fallback: if no streams found but we have an iframe, return the iframe as an embed
-        if (iframeSrc) {
+        if (iframeSrc && baseDom !== "") {
             return {
                 success: true,
                 streamUrl: baseDom,
