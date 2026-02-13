@@ -4,13 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "clean": "npx rimraf dist",
-    "compile": "npx tsc",
-    "build": "npm run clean; npm run compile",
+    "build": "npx rimraf dist && npx tsc",
     "start": "node dist/index.js",
-    "predev": "npm run clean; npm run compile",
+    "predev": "rimraf dist && tsc",
     "dev": "concurrently \"npx tsc -w\" \"nodemon dist/index.js\"",
-    "pre-prod": "npm run build"
+    "pre-prod": "rimraf dist && npm run build"
   },
   "keywords": [],
   "author": "",

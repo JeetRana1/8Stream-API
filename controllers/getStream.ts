@@ -217,12 +217,6 @@ export default async function getStream(req: Request, res: Response) {
       token = parts[0];
       const searchParams = new URLSearchParams(parts[1]);
       proxyRef = decodeURIComponent(searchParams.get('proxy_ref') || "");
-
-      // Blacklist check for proxyRef
-      if (proxyRef.includes('cloudnestra.com') || proxyRef.includes('protection-episode-i-222.site')) {
-        console.log(`[getStream] Ignoring blacklisted proxyRef: ${proxyRef}`);
-        proxyRef = "";
-      }
     }
 
     if (token.startsWith('http')) {
@@ -237,7 +231,6 @@ export default async function getStream(req: Request, res: Response) {
         }
       }
     } else {
-<<<<<<< HEAD
       const streamCacheKey = `stream_url_${token}_${normalizedKey}_${proxyRef || "none"}`;
       const cachedStreamUrl = cache.get(streamCacheKey);
       let canUseCached = false;
@@ -346,68 +339,9 @@ export default async function getStream(req: Request, res: Response) {
           throw new Error(`Unable to resolve stream URL. Tried ${candidateUrls.length} candidates. Last: ${errors[errors.length - 1] || "none"}`);
         }
       }
-=======
-      // New logic: fetch token from mirror
-      let baseDomain = (proxyRef && proxyRef !== '' ? proxyRef : await getPlayerUrl()).replace(/\/$/, '');
-
-      // Double check resolved domain
-      if (baseDomain.includes('cloudnestra.com')) {
-        console.log(`[getStream] Resolved domain is blacklisted (cloudnestra.com). Trying to fetch fresh...`);
-        baseDomain = (await getPlayerUrl()).replace(/\/$/, '');
-      }
-
-      const path = token.startsWith('~') ? token.slice(1) : token;
-      const playlistUrl = `${baseDomain}/playlist/${path}.txt`;
-
-      console.log(`[getStream] Mirroring from: ${baseDomain}`);
-
-      let response;
-      let lastError;
-      const modes = [
-        { name: 'Tor', agent: torAgent },
-        { name: 'Direct', agent: undefined }
-      ];
-
-      for (const mode of modes) {
-        try {
-          response = await axios.get(playlistUrl, {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-              "Referer": baseDomain + "/",
-              "X-Csrf-Token": key
-            },
-            httpAgent: mode.agent,
-            httpsAgent: mode.agent,
-            responseType: 'text',
-            timeout: 15000,
-            validateStatus: (status) => status < 500 // Accept any non-5xx status
-          });
-
-          console.log(`[getStream] ${mode.name} response status: ${response.status}, data type: ${typeof response.data}`);
-
-          if (response.status === 200 && response.data && typeof response.data === 'string') {
-            console.log(`[getStream] Success via ${mode.name}`);
-            break;
-          } else {
-            console.log(`[getStream] ${mode.name} returned invalid data (status ${response.status})`);
-            response = undefined; // Invalidate this response
-          }
-        } catch (e: any) {
-          console.log(`[getStream] Failed via ${mode.name}: ${e.message}`);
-          lastError = e;
-        }
-      }
-
-      if (!response && lastError) throw lastError;
-      if (!response) throw new Error("Failed to fetch stream from mirror");
-
-      finalStreamUrl = response.data;
-      console.log(`[getStream] Received data type: ${typeof finalStreamUrl}, value: ${JSON.stringify(finalStreamUrl).substring(0, 200)}`);
->>>>>>> 4b1fb64253e6d9d93dfed6a87f75e1e232681780
     }
 
     if (!finalStreamUrl || typeof finalStreamUrl !== 'string' || !finalStreamUrl.startsWith('http')) {
-      console.error(`[getStream] Invalid stream URL. Type: ${typeof finalStreamUrl}, Value: ${JSON.stringify(finalStreamUrl)}`);
       return res.status(500).json({ success: false, message: "Invalid stream URL received from mirror" });
     }
 
