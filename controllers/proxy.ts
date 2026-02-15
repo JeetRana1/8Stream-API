@@ -43,7 +43,8 @@ function shouldPreferTor(url: string): boolean {
         lower.includes("heast404jax.com") ||
         lower.includes("i-arch-") ||
         lower.includes("/stream2/") ||
-        lower.includes("i-cdn-")
+        lower.includes("i-cdn-") ||
+        lower.includes("lizer123.site")
     );
 }
 
@@ -183,16 +184,6 @@ export default async function proxy(req: Request, res: Response) {
                     referer = "https://vidsrc.me/";
                 } else if (url.includes('vidlink')) {
                     referer = "https://vidlink.pro/";
-                } else if (url.includes('flixhq') || url.includes('vidcloud')) {
-                    referer = "https://flixhq.to/";
-                } else if (url.includes('sflix')) {
-                    referer = "https://sflix.to/";
-                } else if (url.includes('cineb')) {
-                    referer = "https://cineb.rs/";
-                } else if (url.includes('moviesjoy') || url.includes('rapid-cloud')) {
-                    referer = "https://moviesjoy.is/";
-                } else if (url.includes('himovies')) {
-                    referer = "https://himovies.to/";
                 } else if (url.includes('superembed')) {
                     referer = "https://superembed.stream/";
                 } else {
@@ -244,12 +235,13 @@ export default async function proxy(req: Request, res: Response) {
 
         const tryFetch = async (useTor: boolean, refererOverride?: string) => {
             const manifestTimeoutMs = useTor ? 15000 : 5000;
+            const segmentTimeoutMs = useTor ? 32000 : 12000;
             return await axios.get(targetUrl, {
                 headers: getProxyHeaders(targetUrl, refererOverride),
                 httpAgent: useTor ? torAgent : undefined,
                 httpsAgent: useTor ? torAgent : undefined,
                 responseType: isM3U8 ? 'text' : 'stream',
-                timeout: isSegment ? 20000 : manifestTimeoutMs,
+                timeout: isSegment ? segmentTimeoutMs : manifestTimeoutMs,
                 maxRedirects: 5,
                 validateStatus: (status) => status < 400 // Only count 2xx/3xx as success
             });
@@ -262,11 +254,16 @@ export default async function proxy(req: Request, res: Response) {
             const preferTor = shouldPreferTor(targetUrl);
             if (isSegment) {
                 try {
-                    // Segments should stay direct-first for throughput; Tor fallback only if needed.
-                    response = await tryFetch(false);
+                    if (preferTor) {
+                        // Anti-bot segment hosts are often unusable on direct lane.
+                        response = await tryFetch(true);
+                    } else {
+                        // Keep direct-first for regular hosts.
+                        response = await tryFetch(false);
+                    }
                 } catch (e: any) {
-                    // If blocked (403), immediately switch to Tor
-                    if (e.message.includes('403') || e.message.includes('401')) {
+                    // For non-preferred hosts, fallback to Tor on block/failure.
+                    if (!preferTor && (e.message.includes('403') || e.message.includes('401'))) {
                         console.log(`[Proxy Adaptive] Direct blocked (${e.message}). Switching to Tor lane...`);
                     }
                     try {
@@ -471,14 +468,14 @@ export default async function proxy(req: Request, res: Response) {
 
         response.data.pipe(res);
 
-    } catch (error: any) {
-        // Only log fatal errors for manifests (crucial for debugging)
-        // Silence segment errors as they are retried or handled by the player
-        if (!isSegment) {
-            console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
-        } else {
-            console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
-        }
+        } catch (error: any) {
+            // Only log fatal errors for manifests (crucial for debugging)
+            // Silence segment errors as they are retried or handled by the player
+            if (!isSegment) {
+                console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
+            } else {
+                console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
+            }
 
         if (!res.headersSent) {
             res.status(500).send("Proxy connectivity issues. Please try refreshing.");

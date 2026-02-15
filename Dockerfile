@@ -1,14 +1,11 @@
-FROM mcr.microsoft.com/playwright:v1.49.0-jammy
+FROM node:20-alpine
 
-# Install Tor
-RUN apt-get update && apt-get install -y tor && rm -rf /var/lib/apt/lists/*
+# Install Tor and create a directory for it
+RUN apk add --no-cache tor
 
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
-
-# Install Playwright browsers (chromium only to save space)
-RUN npx playwright install chromium --with-deps
 
 COPY . .
 RUN npm run build
@@ -19,7 +16,7 @@ RUN echo "#!/bin/sh" > /app/start.sh && \
     echo "npm start" >> /app/start.sh && \
     chmod +x /app/start.sh
 
-# Open port 7860
+# Open port 7860 for Hugging Face
 ENV PORT=7860
 EXPOSE 7860
 
