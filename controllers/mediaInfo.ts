@@ -54,17 +54,30 @@ export default async function mediaInfo(req: Request, res: Response) {
     }
 
     const uniqueCandidates = Array.from(new Set(candidates.filter(Boolean)));
-    console.log(`[mediaInfo] ID candidates for ${requestedId}: ${uniqueCandidates.join(" -> ")}`);
+    console.log(`[mediaInfo] Multi-ID Parallel Resolution for ${requestedId}: ${uniqueCandidates.join(" & ")}`);
 
     let data: any = { success: false, message: "Media not found" };
-    for (const candidate of uniqueCandidates) {
-      console.log(`Received request for ID: ${id} (Trying: ${candidate})`);
-      data = await getInfo(candidate);
-      if (data?.success) break;
+
+    // 💡 Parallel Race: Try all ID candidates at once
+    const results = await Promise.all(uniqueCandidates.map(async (candidate) => {
+      try {
+        return await getInfo(candidate);
+      } catch {
+        return { success: false };
+      }
+    }));
+
+    // Grab the first successful result
+    const successResult = results.find(r => r && r.success);
+    if (successResult) {
+      data = successResult;
+    } else {
+      // Fallback to the last failure message if nothing succeeded
+      data = results[0] || { success: false, message: "No mirrors responded." };
     }
 
     console.log(`Response data:`, data);
-    
+
     // Cache success briefly: upstream file/key tokens are short-lived and become invalid.
     if (data.success) {
       cache.set(cacheKey, data, MEDIAINFO_SUCCESS_CACHE_TTL_MS);
@@ -90,20 +103,20 @@ export default async function mediaInfo(req: Request, res: Response) {
       // Cache failed results for shorter duration to allow retries
       cache.set(cacheKey, data, MEDIAINFO_FAILURE_CACHE_TTL_MS);
     }
-    
+
     res.json(data);
   } catch (err) {
     console.log("error in mediaInfo: ", err);
-    
+
     // Send error response
     const errorResponse = {
       success: false,
       message: "Internal server error: " + (err instanceof Error ? err.message : String(err)),
     };
-    
+
     // Cache the error response briefly to prevent retry storms.
     cache.set(cacheKey, errorResponse, MEDIAINFO_FAILURE_CACHE_TTL_MS);
-    
+
     res.status(500).json(errorResponse);
   }
 }
