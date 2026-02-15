@@ -56,27 +56,33 @@ export default async function mediaInfo(req: Request, res: Response) {
     const uniqueCandidates = Array.from(new Set(candidates.filter(Boolean)));
     console.log(`[mediaInfo] Multi-ID Parallel Resolution for ${requestedId}: ${uniqueCandidates.join(" & ")}`);
 
-    let data: any = { success: false, message: "Media not found" };
+    // 💡 Performance Hack: Return as soon as we find a winner
+    const data = await new Promise<any>((resolve) => {
+      let finished = 0;
+      let bestFailure: any = null;
 
-    // 💡 Parallel Race: Try all ID candidates at once
-    const results = await Promise.all(uniqueCandidates.map(async (candidate) => {
-      try {
-        return await getInfo(candidate);
-      } catch {
-        return { success: false };
-      }
-    }));
+      if (uniqueCandidates.length === 0) return resolve({ success: false, message: "No IDs to search." });
 
-    // Grab the first successful result
-    const successResult = results.find(r => r && r.success);
-    if (successResult) {
-      data = successResult;
-    } else {
-      // Fallback to the last failure message if nothing succeeded
-      data = results[0] || { success: false, message: "No mirrors responded." };
-    }
+      uniqueCandidates.forEach(async (candidate) => {
+        try {
+          const res = await getInfo(candidate);
+          if (res?.success) {
+            resolve(res);
+          } else {
+            bestFailure = res;
+          }
+        } catch (err) {
+          bestFailure = { success: false, message: String(err) };
+        } finally {
+          finished++;
+          if (finished === uniqueCandidates.length) {
+            resolve(bestFailure || { success: false, message: "Media not found" });
+          }
+        }
+      });
+    });
 
-    console.log(`Response data:`, data);
+    console.log(`[mediaInfo] Response for ${requestedId}:`, data?.success ? "SUCCESS" : "FAILED");
 
     // Cache success briefly: upstream file/key tokens are short-lived and become invalid.
     if (data.success) {
