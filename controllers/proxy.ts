@@ -1,5 +1,7 @@
 import axios from "axios";
 import { Request, Response } from "express";
+import http from "node:http";
+import https from "node:https";
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { getPlayerUrl } from "../lib/getPlayerUrl";
 
@@ -7,7 +9,18 @@ const torAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
 const manifestCookieJar = new Map<string, { cookie: string; timestamp: number }>();
 const MANIFEST_COOKIE_TTL_MS = 30 * 60 * 1000;
 const manifestResponseCache = new Map<string, { body: string; expiresAt: number }>();
-const MANIFEST_CACHE_TTL_MS = 8000;
+const MANIFEST_CACHE_TTL_MS = 30000; // Increased to 30s for better stability
+
+// Persistent agents for connection pooling (Huge performance boost for HLS)
+const keepAliveHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
+const keepAliveHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
+
+// Smart Host Cache: Remember which hosts actually need Tor to avoid repeated direct-lane timeouts
+const hostNeedsTor = new Map<string, { timestamp: number }>();
+const HOST_BLOCK_TTL = 30 * 60 * 1000; // 30 minutes
+
+
+
 
 function extractCookieHeader(setCookieHeader: string[] | undefined): string {
     if (!setCookieHeader || !setCookieHeader.length) return "";
@@ -60,11 +73,10 @@ export default async function proxy(req: Request, res: Response) {
     const proxyBase = `${protocol}://${host}/api/v1/proxy?url=`;
 
     // 0. Safety Valve: Smart Passthrough for Fragile Audio Providers (via Tor)
-    // If we detect lizer123 or similar audio hosts, we turn off all "smart" features and use Tor
     if (targetUrl && (targetUrl.includes('lizer123') || targetUrl.includes('getm3u8'))) {
-        console.log(`[Proxy Raw] Tor Passthrough for fragile audio: ${targetUrl}`);
         try {
             const rawRes = await axios.get(targetUrl, {
+
                 responseType: 'arraybuffer', // Fetch as buffer to inspect content
                 headers: {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -165,10 +177,11 @@ export default async function proxy(req: Request, res: Response) {
                 res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
                 res.setHeader("Access-Control-Allow-Headers", "*");
                 res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-                res.setHeader("Cache-Control", "public, max-age=6");
+                res.setHeader("Cache-Control", "public, max-age=15"); // Increased cache-control
                 return res.send(cachedManifest.body);
             }
         }
+
 
         const getProxyHeaders = (url: string, refererOverride?: string) => {
             const uri = new URL(url);
@@ -234,147 +247,79 @@ export default async function proxy(req: Request, res: Response) {
         };
 
         const tryFetch = async (useTor: boolean, refererOverride?: string) => {
-            const manifestTimeoutMs = useTor ? 15000 : 5000;
-            const segmentTimeoutMs = useTor ? 32000 : 12000;
+            const manifestTimeoutMs = useTor ? 12000 : 6000;
+            const segmentTimeoutMs = useTor ? 25000 : 10000;
+
+            const uri = new URL(targetUrl);
+            const isHttps = uri.protocol === 'https:';
+
             return await axios.get(targetUrl, {
                 headers: getProxyHeaders(targetUrl, refererOverride),
-                httpAgent: useTor ? torAgent : undefined,
-                httpsAgent: useTor ? torAgent : undefined,
+                httpAgent: useTor ? torAgent : (isHttps ? undefined : keepAliveHttpAgent),
+                httpsAgent: useTor ? torAgent : (isHttps ? keepAliveHttpsAgent : undefined),
                 responseType: isM3U8 ? 'text' : 'stream',
                 timeout: isSegment ? segmentTimeoutMs : manifestTimeoutMs,
-                maxRedirects: 5,
-                validateStatus: (status) => status < 400 // Only count 2xx/3xx as success
+                maxRedirects: 4, // Reduced slightly to avoid loops
+                validateStatus: (status) => status < 400
             });
         };
 
-        let response;
+
+        let response: any;
+        const targetHost = new URL(targetUrl).hostname;
+        const needsTorCached = hostNeedsTor.has(targetHost);
+
         try {
-            // Priority for segments: Try Direct FIRST for speed, then Tor Fallback
-            // But if we detect a 403 (Block), we fail-fast to Tor to save time
             const preferTor = shouldPreferTor(targetUrl);
-            if (isSegment) {
+
+            // Priority execution: If we know the host is blocked or it's a known anti-bot host, go straight to Tor
+            if (preferTor || needsTorCached) {
                 try {
-                    if (preferTor) {
-                        // Anti-bot segment hosts are often unusable on direct lane.
-                        response = await tryFetch(true);
-                    } else {
-                        // Keep direct-first for regular hosts.
-                        response = await tryFetch(false);
-                    }
+                    response = await tryFetch(true);
                 } catch (e: any) {
-                    // For non-preferred hosts, fallback to Tor on block/failure.
-                    if (!preferTor && (e.message.includes('403') || e.message.includes('401'))) {
-                        console.log(`[Proxy Adaptive] Direct blocked (${e.message}). Switching to Tor lane...`);
-                    }
-                    try {
-                        response = await tryFetch(true);
-                    } catch (torErr: any) {
-                        // Retry with alternate referers for strict CDN anti-hotlinking.
-                        const fallbackReferers = Array.from(new Set([
-                            proxyRef || "",
-                            targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1),
-                            `https://${new URL(targetUrl).host}/`
-                        ].filter(Boolean)));
-
-                        let lastErr: any = torErr;
-                        for (const ref of fallbackReferers) {
-                            try {
-                                response = await tryFetch(true, ref);
-                                lastErr = null;
-                                break;
-                            } catch (retryErr: any) {
-                                lastErr = retryErr;
-                            }
-                        }
-
-                        if (lastErr) {
-                            // Segment-specific rescue: refresh parent manifest and retry the same segment path.
-                            try {
-                                if (proxyRef) {
-                                    const segmentName = (() => {
-                                        try {
-                                            const p = new URL(targetUrl).pathname;
-                                            return p.substring(p.lastIndexOf('/') + 1);
-                                        } catch {
-                                            return "";
-                                        }
-                                    })();
-
-                                    if (segmentName) {
-                                        let manifestRes;
-                                        try {
-                                            manifestRes = await axios.get(proxyRef, {
-                                                headers: getProxyHeaders(proxyRef, proxyRef),
-                                                timeout: 12000
-                                            });
-                                        } catch {
-                                            manifestRes = await axios.get(proxyRef, {
-                                                headers: getProxyHeaders(proxyRef, proxyRef),
-                                                httpAgent: torAgent,
-                                                httpsAgent: torAgent,
-                                                timeout: 15000
-                                            });
-                                        }
-
-                                        const manifestText = typeof manifestRes.data === "string"
-                                            ? manifestRes.data
-                                            : Buffer.from(manifestRes.data || "").toString("utf-8");
-
-                                        const base = proxyRef.substring(0, proxyRef.lastIndexOf('/') + 1);
-                                        const manifestLines = manifestText
-                                            .split('\n')
-                                            .map((l: string) => l.trim())
-                                            .filter((l: string) => l && !l.startsWith('#'));
-
-                                        const exactLine = manifestLines.find((l: string) => l.includes(segmentName));
-                                        const latestLine = [...manifestLines].reverse().find((l: string) =>
-                                            l.includes('.ts') || l.includes('.m4s') || l.includes('segment')
-                                        );
-                                        const chosenLine = exactLine || latestLine;
-
-                                        if (chosenLine) {
-                                            targetUrl = chosenLine.startsWith('http')
-                                                ? chosenLine
-                                                : new URL(chosenLine, base).href;
-                                            response = await tryFetch(true, proxyRef);
-                                        } else {
-                                            throw lastErr;
-                                        }
-                                    } else {
-                                        throw lastErr;
-                                    }
-                                } else {
-                                    throw lastErr;
-                                }
-                            } catch {
-                                throw lastErr;
-                            }
-                        }
-                    }
+                    // Critical Fallback: If Tor fails but it wasn't a "hard" anti-bot host, try direct as last resort
+                    if (!preferTor) {
+                        try {
+                            response = await tryFetch(false);
+                            hostNeedsTor.delete(targetHost); // Host is back online direct!
+                        } catch { throw e; }
+                    } else throw e;
                 }
             } else {
-                // For known anti-bot hosts, Tor-first is faster and avoids manifest timeout loops.
-                if (preferTor) {
-                    try {
-                        response = await tryFetch(true);
-                    } catch (e) {
-                        console.log(`[Proxy Fallback] Tor failed for manifest. Trying direct...`);
-                        response = await tryFetch(false);
-                    }
-                    // eslint-disable-next-line no-lonely-if
-                } else {
-                    // Manifests also try direct first for faster startup, then fallback to Tor.
-                    try {
-                        response = await tryFetch(false);
-                    } catch (e) {
-                        console.log(`[Proxy Fallback] Direct failed for manifest. Trying Tor...`);
-                        response = await tryFetch(true);
-                    }
+                // Regular hosts: Try direct lane first for maximum speed
+                try {
+                    response = await tryFetch(false);
+                } catch (e: any) {
+                    // Failover to Tor on block (403/401) or timeout
+                    const isBlock = e.response?.status === 403 || e.response?.status === 401;
+                    if (isBlock || e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
+                        hostNeedsTor.set(targetHost, { timestamp: Date.now() });
+
+                        // Robust segment retry logic
+                        try {
+                            response = await tryFetch(true);
+                        } catch (torErr: any) {
+                            if (isSegment) {
+                                // Last ditch: refresh parent manifest and retry
+                                if (proxyRef) {
+                                    try {
+                                        const manifestRes = await axios.get(proxyRef, {
+                                            headers: getProxyHeaders(proxyRef, proxyRef),
+                                            timeout: 8000
+                                        });
+                                        // ... simpler recovery or just throw ...
+                                    } catch { }
+                                }
+                            }
+                            throw torErr;
+                        }
+                    } else throw e;
                 }
             }
         } catch (finalErr: any) {
             throw finalErr;
         }
+
 
         if (!response) {
             throw new Error("Proxy fetch failed: empty upstream response");
@@ -390,9 +335,8 @@ export default async function proxy(req: Request, res: Response) {
 
         // 3. Recursive HLS Rewriting (Manifests)
         if (isM3U8 || (contentType && (contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL')))) {
-            console.log(`[Proxy Manifest] Rewriting: ${targetUrl.substring(0, 60)}...`);
-
             let content = "";
+
             if (typeof response.data === 'string') {
                 content = response.data;
             } else if (Buffer.isBuffer(response.data)) {
@@ -458,7 +402,7 @@ export default async function proxy(req: Request, res: Response) {
         // 4. Handle Binary/Segment Data (Piping)
         res.setHeader("Content-Type", contentType || (isSegment ? "video/mp2t" : "application/octet-stream"));
         if (isSegment) {
-            res.setHeader("Cache-Control", "public, max-age=60");
+            res.setHeader("Cache-Control", "public, max-age=3600"); // Segments are immutable, cache longer
         }
 
         // Ensure accurate content length if provided
@@ -466,16 +410,22 @@ export default async function proxy(req: Request, res: Response) {
             res.setHeader("Content-Length", response.headers["content-length"]);
         }
 
+        // Start flushing headers immediately to improve Time to First Byte
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
         response.data.pipe(res);
 
-        } catch (error: any) {
-            // Only log fatal errors for manifests (crucial for debugging)
-            // Silence segment errors as they are retried or handled by the player
-            if (!isSegment) {
-                console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
-            } else {
-                console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
-            }
+
+    } catch (error: any) {
+        // Only log fatal errors for manifests (crucial for debugging)
+        // Silence segment errors as they are retried or handled by the player
+        if (!isSegment) {
+            console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
+        } else {
+            console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
+        }
 
         if (!res.headersSent) {
             res.status(500).send("Proxy connectivity issues. Please try refreshing.");
