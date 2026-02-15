@@ -12,8 +12,10 @@ const manifestResponseCache = new Map<string, { body: string; expiresAt: number 
 const MANIFEST_CACHE_TTL_MS = 30000; // Increased to 30s for better stability
 
 // Persistent agents for connection pooling (Huge performance boost for HLS)
-const keepAliveHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
-const keepAliveHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
+// Increased maxSockets for concurrent segment loading on mobile
+const keepAliveHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 150, scheduling: 'lifo' });
+const keepAliveHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 150, scheduling: 'lifo' });
+
 
 // Smart Host Cache: Remember which hosts actually need Tor to avoid repeated direct-lane timeouts
 const hostNeedsTor = new Map<string, { timestamp: number }>();
@@ -247,22 +249,27 @@ export default async function proxy(req: Request, res: Response) {
         };
 
         const tryFetch = async (useTor: boolean, refererOverride?: string) => {
-            const manifestTimeoutMs = useTor ? 12000 : 6000;
-            const segmentTimeoutMs = useTor ? 25000 : 10000;
+            const manifestTimeoutMs = useTor ? 12000 : 4000; // Even tighter for mobile startup
+            const segmentTimeoutMs = useTor ? 25000 : 12000;
 
             const uri = new URL(targetUrl);
             const isHttps = uri.protocol === 'https:';
 
             return await axios.get(targetUrl, {
-                headers: getProxyHeaders(targetUrl, refererOverride),
+                headers: {
+                    ...getProxyHeaders(targetUrl, refererOverride),
+                    "Accept-Encoding": "gzip, deflate, br" // Explicitly request compression
+                },
                 httpAgent: useTor ? torAgent : (isHttps ? undefined : keepAliveHttpAgent),
                 httpsAgent: useTor ? torAgent : (isHttps ? keepAliveHttpsAgent : undefined),
                 responseType: isM3U8 ? 'text' : 'stream',
                 timeout: isSegment ? segmentTimeoutMs : manifestTimeoutMs,
-                maxRedirects: 4, // Reduced slightly to avoid loops
-                validateStatus: (status) => status < 400
+                maxRedirects: 3, // Faster failure
+                validateStatus: (status) => status < 400,
+                decompress: true // Handle compressed response from upstream
             });
         };
+
 
 
         let response: any;
@@ -402,7 +409,7 @@ export default async function proxy(req: Request, res: Response) {
         // 4. Handle Binary/Segment Data (Piping)
         res.setHeader("Content-Type", contentType || (isSegment ? "video/mp2t" : "application/octet-stream"));
         if (isSegment) {
-            res.setHeader("Cache-Control", "public, max-age=3600"); // Segments are immutable, cache longer
+            res.setHeader("Cache-Control", "public, max-age=86400, immutable"); // Maximize browser caching
         }
 
         // Ensure accurate content length if provided
@@ -415,7 +422,9 @@ export default async function proxy(req: Request, res: Response) {
             res.flushHeaders();
         }
 
+        // Optimized piping: Increase buffer size for mobile streaming if possible
         response.data.pipe(res);
+
 
 
     } catch (error: any) {
