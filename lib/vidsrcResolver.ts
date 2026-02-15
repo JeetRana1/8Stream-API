@@ -88,9 +88,6 @@ export async function scrapeVidSrc(tmdbId: string, type: "movie" | "tv" = "movie
                             });
                         });
 
-                        // Take a screenshot for debugging
-                        await page.screenshot({ path: `screenshot_${domain.replace(/https?:\/\//, "").replace(/\./g, "_")}.png` });
-
                         const frameSelector = "#the_frame";
                         const frameDiv = await page.waitForSelector(frameSelector, { timeout: 10000 }).catch(() => null);
 
