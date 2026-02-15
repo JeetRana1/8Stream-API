@@ -78,8 +78,18 @@ export default async function proxy(req: Request, res: Response) {
     try {
         const urlObj = new URL(targetUrl);
         const targetHost = urlObj.hostname;
-        const isM3U8 = targetUrl.includes(".m3u8") || req.query.type === 'm3u8';
-        const isSegment = targetUrl.includes(".ts") || targetUrl.includes(".m4s") || targetUrl.includes(".mp4") || targetUrl.includes(".aac");
+
+        // Improved detection: identify manifests even without .m3u8 extension
+        const isM3U8 = targetUrl.includes(".m3u8") ||
+            targetUrl.includes("getm3u8") ||
+            targetUrl.includes("/playlist") ||
+            req.query.type === 'm3u8';
+
+        const isSegment = targetUrl.includes(".ts") ||
+            targetUrl.includes(".m4s") ||
+            targetUrl.includes(".mp4") ||
+            targetUrl.includes(".aac") ||
+            targetUrl.includes("/segment");
         const proxyRef = (req.query.proxy_ref as string) || (req.headers.referer && !req.headers.referer.includes(host) ? req.headers.referer : undefined);
 
         // Cleanup stale host block cache
@@ -155,7 +165,16 @@ export default async function proxy(req: Request, res: Response) {
 
         // --- MANIFEST REWRITING (The Heart of Audio Switching) ---
         if (isM3U8 || contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL') || (typeof response.data === 'string' && response.data.startsWith('#EXTM3U'))) {
-            let content = typeof response.data === 'string' ? response.data : response.data.toString();
+            let content = "";
+            if (typeof response.data === 'string') {
+                content = response.data;
+            } else if (Buffer.isBuffer(response.data)) {
+                content = response.data.toString('utf-8');
+            } else if (response.data && typeof response.data.toString === 'function') {
+                // If it's a stream or other object, we need to handle it carefully.
+                // However, tryFetch now returns 'text' if isM3U8 is true.
+                content = response.data.toString();
+            }
 
             // Capture Cookies
             const setCookie = response.headers["set-cookie"];
