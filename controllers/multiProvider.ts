@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
-import { scrapeVidSrc } from "../lib/vidsrcResolver";
+import { scrapeMulti, ScrapeResult } from "../lib/multiResolver";
 import cache from "../lib/cache";
 
-export default async function vidsrcController(req: Request, res: Response) {
+export default async function multiProviderController(req: Request, res: Response) {
     const tmdb_id = req.query.tmdb_id as string;
     const type = (req.query.type as "movie" | "tv") || "movie";
     const season = req.query.season ? parseInt(req.query.season as string) : undefined;
@@ -22,35 +22,38 @@ export default async function vidsrcController(req: Request, res: Response) {
         });
     }
 
-    const cacheKey = `vidsrc_${tmdb_id}_${type}_${season || 0}_${episode || 0}`;
+    const cacheKey = `multi_${tmdb_id}_${type}_${season || 0}_${episode || 0}`;
     const cached = cache.get(cacheKey);
     if (cached) {
-        console.log(`[vidsrc] Serving from cache for ${tmdb_id}`);
+        console.log(`[multi] Serving from cache for ${tmdb_id}`);
         return res.json(cached);
     }
 
     try {
-        const results = await scrapeVidSrc(tmdb_id, type, season, episode);
+        const results = await scrapeMulti(tmdb_id, type, season, episode);
 
-        // Find at least one successful result
-        const firstSuccessful = Object.values(results).find(r => r.hls_url);
+        const host = req.get('host');
+        const protocol = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+        const proxyBase = `${protocol}://${host}/api/v1/proxy?url=`;
+
+        const proxiedResults = results.map(r => ({
+            ...r,
+            video_url: `${proxyBase}${encodeURIComponent(r.video_url!)}&proxy_ref=${encodeURIComponent(r.source || r.video_url!)}`
+        }));
 
         const response = {
-            success: !!firstSuccessful,
-            results,
-            // Provide a simplified main result if successful
-            data: firstSuccessful ? {
-                hls_url: firstSuccessful.hls_url,
-                subtitles: firstSuccessful.subtitles
-            } : null
+            success: proxiedResults.length > 0,
+            results: proxiedResults,
+            // Provide a primary result (prefer VidSrc or first successful)
+            data: proxiedResults.length > 0 ? proxiedResults[0] : null
         };
 
-        // Cache the result for 30 minutes
+        // Cache for 30 minutes
         cache.set(cacheKey, response, 30 * 60 * 1000);
 
         res.json(response);
     } catch (err: any) {
-        console.error(`[vidsrc] Unexpected error: ${err.message}`);
+        console.error(`[multi] Unexpected error: ${err.message}`);
         res.status(500).json({
             success: false,
             error: "Unexpected server error",

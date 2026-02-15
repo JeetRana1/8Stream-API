@@ -183,6 +183,16 @@ export default async function proxy(req: Request, res: Response) {
                     referer = "https://vidsrc.me/";
                 } else if (url.includes('vidlink')) {
                     referer = "https://vidlink.pro/";
+                } else if (url.includes('flixhq') || url.includes('vidcloud')) {
+                    referer = "https://flixhq.to/";
+                } else if (url.includes('sflix')) {
+                    referer = "https://sflix.to/";
+                } else if (url.includes('cineb')) {
+                    referer = "https://cineb.rs/";
+                } else if (url.includes('moviesjoy') || url.includes('rapid-cloud')) {
+                    referer = "https://moviesjoy.is/";
+                } else if (url.includes('himovies')) {
+                    referer = "https://himovies.to/";
                 } else if (url.includes('superembed')) {
                     referer = "https://superembed.stream/";
                 } else {
@@ -461,14 +471,14 @@ export default async function proxy(req: Request, res: Response) {
 
         response.data.pipe(res);
 
-        } catch (error: any) {
-            // Only log fatal errors for manifests (crucial for debugging)
-            // Silence segment errors as they are retried or handled by the player
-            if (!isSegment) {
-                console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
-            } else {
-                console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
-            }
+    } catch (error: any) {
+        // Only log fatal errors for manifests (crucial for debugging)
+        // Silence segment errors as they are retried or handled by the player
+        if (!isSegment) {
+            console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
+        } else {
+            console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
+        }
 
         if (!res.headersSent) {
             res.status(500).send("Proxy connectivity issues. Please try refreshing.");
