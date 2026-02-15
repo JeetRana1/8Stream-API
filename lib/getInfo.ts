@@ -23,152 +23,98 @@ export default async function getInfo(id: string) {
         .filter(Boolean)
     ));
 
-    const paths = [
-      `/play/${id}`,
-      `/play/${id}?tr=1`,
-      `/play/${id}?tr=2`,
-      `/v/${id}`,
-      `/watch/${id}`
-    ];
-
-    const refererCandidates = [
-      "https://allmovieland.link/",
-      "https://google.com/"
-    ];
+    const paths = [`/play/${id}`, `/play/${id}?tr=1`, `/play/${id}?tr=2`, `/v/${id}`, `/watch/${id}`];
+    const refererCandidates = ["https://allmovieland.link/", "https://google.com/"];
 
     let resultData: any = null;
+    let foundAFile = false; // Flag to track if we at least found a metadata block
 
-    console.log(`[getInfo] Starting parallel resolution for ID: ${id} across ${playerUrlCandidates.length} domains...`);
+    console.log(`[getInfo] Resolving ${id} via ${playerUrlCandidates.length} domains...`);
 
-    // Process domains in parallel for speed
-    await Promise.all(playerUrlCandidates.map(async (playerUrl) => {
+    // Run domains in parallel
+    await Promise.all(playerUrlCandidates.map(async (domain) => {
       if (resultData) return;
 
-      const domain = playerUrl.replace(/\/$/, '');
-      const perDomainReferers = Array.from(new Set([
-        `${domain}/`,
-        ...refererCandidates
-      ]));
+      const perDomainReferers = Array.from(new Set([`${domain}/`, ...refererCandidates]));
 
-      // Try all paths for this domain
       for (const path of paths) {
         if (resultData) return;
         const targetUrl = `${domain}${path}`;
 
-        // Try referers
         for (const referer of perDomainReferers) {
           if (resultData) return;
 
           try {
             const headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-              "Accept-Language": "en-US,en;q=0.9",
               "Referer": referer,
-              "Origin": referer.replace(/\/$/, ''),
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
               "Cache-Control": "no-cache"
             };
 
             const useTor = shouldPreferTor(targetUrl) || hostNeedsTor.has(new URL(targetUrl).hostname);
-
             let response: any;
-            if (useTor) {
-              response = await axios.get(targetUrl, { headers, httpAgent: torAgent, httpsAgent: torAgent, timeout: 12000 });
-            } else {
-              try {
-                response = await axios.get(targetUrl, { headers, timeout: 5000 });
-              } catch (e: any) {
-                // Failover to Tor on timeout or block
-                if (e.code === 'ECONNABORTED' || e.response?.status === 403 || e.response?.status === 401) {
-                  hostNeedsTor.set(new URL(targetUrl).hostname, { timestamp: Date.now() });
-                  response = await axios.get(targetUrl, { headers, httpAgent: torAgent, httpsAgent: torAgent, timeout: 12000 });
-                } else throw e;
-              }
+
+            try {
+              response = await axios.get(targetUrl, {
+                headers,
+                timeout: useTor ? 15000 : 7000,
+                httpAgent: useTor ? torAgent : undefined,
+                httpsAgent: useTor ? torAgent : undefined
+              });
+            } catch (err: any) {
+              // Failover to Tor on timeout or 403
+              if (!useTor && (err.code === 'ECONNABORTED' || err.response?.status === 403)) {
+                hostNeedsTor.set(new URL(targetUrl).hostname, { timestamp: Date.now() });
+                response = await axios.get(targetUrl, { headers, httpAgent: torAgent, httpsAgent: torAgent, timeout: 20000 });
+              } else throw err;
             }
 
             if (response.status === 200) {
               const html = String(response.data);
               const $ = cheerio.load(html);
-
-              // Find all script tags and look for the one containing player data
               const scripts = $("script").map((i, el) => $(el).html()).get();
 
               for (const script of scripts) {
                 if (!script || !script.includes("file")) continue;
 
-                // Improved regex to find JSON objects containing "file"
-                // Matches objects starting with { and ending with } before a semicolon or end of line
-                const contentMatch = script.match(/(\{.*?\bfile\b.*?\})/s);
-                if (!contentMatch || !contentMatch[1]) continue;
+                // Robust extraction: Look for anything resembling a playlist config object
+                // This covers JSON, JS objects, and obfuscated formats
+                const fileMatch = script.match(/["']?file["']?\s*:\s*["']([^"']+)["']/);
+                const keyMatch = script.match(/["']?key["']?\s*:\s*["']([^"']+)["']/);
 
-                try {
-                  const rawJson = contentMatch[1].trim();
-                  const data = JSON.parse(rawJson);
-                  const file = data["file"];
-                  const key = data["key"];
-
-                  if (!file) continue;
-
-                  console.log(`[getInfo] Found data on ${targetUrl}, file: ${file.substring(0, 30)}...`);
-
+                if (fileMatch && fileMatch[1]) {
+                  foundAFile = true;
+                  const file = fileMatch[1];
+                  const key = keyMatch ? keyMatch[1] : "";
                   const link = file.startsWith("http") ? file : `${domain}${file}`;
 
-                  const playlistConfig = {
-                    headers: {
-                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                      "Accept": "*/*",
-                      "Referer": targetUrl,
-                      "X-Csrf-Token": key || ""
-                    },
-                    timeout: 8000
-                  };
-
-                  let playlistRes: any;
                   try {
-                    playlistRes = await axios.get(link, playlistConfig);
-                  } catch {
-                    playlistRes = await axios.get(link, { ...playlistConfig, httpAgent: torAgent, httpsAgent: torAgent, timeout: 12000 });
-                  }
+                    const playlistRes = await axios.get(link, {
+                      headers: { "User-Agent": headers["User-Agent"], "Referer": targetUrl, "X-Csrf-Token": key },
+                      timeout: 10000
+                    });
 
-                  const playlist = Array.isArray(playlistRes.data)
-                    ? playlistRes.data.filter((item: any) => item && (item.file || item.folder))
-                    : [];
+                    // Flexible playlist detection (direct array or list property)
+                    let playlist = Array.isArray(playlistRes.data) ? playlistRes.data : (playlistRes.data.list || []);
+                    playlist = playlist.filter((item: any) => item && (item.file || item.folder));
 
-                  if (playlist.length > 0) {
-                    console.log(`[getInfo] RESOLVED: ${id} via ${targetUrl}`);
-                    resultData = { success: true, data: { playlist, key } };
-                    return;
-                  }
-                } catch (parseErr) {
-                  // If strict JSON fail, try to extract file/key manually with regex
-                  const fileMatch = script.match(/["']file["']\s*:\s*["']([^"']+)["']/);
-                  const keyMatch = script.match(/["']key["']\s*:\s*["']([^"']+)["']/);
-
-                  if (fileMatch && fileMatch[1]) {
-                    const file = fileMatch[1];
-                    const key = keyMatch ? keyMatch[1] : "";
-
-                    console.log(`[getInfo] Found data via regex on ${targetUrl}`);
-
-                    const link = file.startsWith("http") ? file : `${domain}${file}`;
-                    const playlistConfig = {
-                      headers: {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                        "Accept": "*/*",
-                        "Referer": targetUrl,
-                        "X-Csrf-Token": key
-                      },
-                      timeout: 8000
-                    };
-
+                    if (playlist.length > 0) {
+                      console.log(`[getInfo] SUCCESS: Resolved ${id} via ${targetUrl}`);
+                      resultData = { success: true, data: { playlist, key } };
+                      return;
+                    }
+                  } catch (e) {
+                    // Attempt playlist fetch via Tor if direct fails
                     try {
-                      const playlistRes = await axios.get(link, playlistConfig);
-                      const playlist = Array.isArray(playlistRes.data)
-                        ? playlistRes.data.filter((item: any) => item && (item.file || item.folder))
-                        : [];
-
+                      const torPlaylistRes = await axios.get(link, {
+                        headers: { "User-Agent": headers["User-Agent"], "Referer": targetUrl, "X-Csrf-Token": key },
+                        httpAgent: torAgent, httpsAgent: torAgent, timeout: 15000
+                      });
+                      let playlist = Array.isArray(torPlaylistRes.data) ? torPlaylistRes.data : (torPlaylistRes.data.list || []);
+                      playlist = playlist.filter((item: any) => item && (item.file || item.folder));
                       if (playlist.length > 0) {
-                        console.log(`[getInfo] RESOLVED via regex: ${id} via ${targetUrl}`);
+                        console.log(`[getInfo] SUCCESS (via Tor): Resolved ${id} via ${targetUrl}`);
                         resultData = { success: true, data: { playlist, key } };
                         return;
                       }
@@ -178,7 +124,7 @@ export default async function getInfo(id: string) {
               }
             }
           } catch (e: any) {
-            // Silent fail for individual candidate paths
+            // Silently continue for this path
           }
         }
       }
@@ -186,16 +132,13 @@ export default async function getInfo(id: string) {
 
     if (resultData) return resultData;
 
-    console.log(`[getInfo] Resolution FAILED for ID: ${id}`);
     return {
       success: false,
-      message: "Media not found or mirrors are currently inaccessible."
+      message: foundAFile
+        ? "Stream found but playlist is empty (media might not be released yet)."
+        : "Media not found or mirrors are currently inaccessible."
     };
   } catch (error: any) {
-    console.error(`[getInfo] Critical Error:`, error.message);
-    return {
-      success: false,
-      message: `API Error: ${error.message}`,
-    };
+    return { success: false, message: `API Error: ${error.message}` };
   }
 }
