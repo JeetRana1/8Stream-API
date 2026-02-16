@@ -1,5 +1,5 @@
 import getAllMovieLandStream from "./providers/allmovieland";
-import { getVidSrcStream } from "./providers/vidsrc";
+import { getSmashyStreamStream } from "./providers/smashystream";
 import { get2EmbedStream } from "./providers/2embed";
 
 /**
@@ -14,7 +14,7 @@ export default async function getInfo(id: string) {
     // Then fallback to others for better coverage
     const providers = [
         { name: "AllMovieLand", fn: getAllMovieLandStream },
-        { name: "VidSrc", fn: getVidSrcStream },
+        { name: "Smashystream", fn: getSmashyStreamStream },
         { name: "2Embed", fn: get2EmbedStream }
     ];
 
