@@ -23,19 +23,23 @@ export default async function getSeasonList(req: Request, res: Response) {
     const mediaInfo = await getInfo(id as string);
     if (!mediaInfo.success) {
       const errorResult = { success: false, message: "Media not found" };
-      
+
       // Cache the error result for 5 minutes
       cache.set(cacheKey, errorResult, 5 * 60 * 1000);
-      
+
       return res.json(errorResult);
     }
-    const playlist = mediaInfo?.data?.playlist;
+
+    // After checking success, we can safely access data
+    const successResult = mediaInfo as { success: true; data: { playlist: any[]; key: any; provider?: string } };
+
+    const playlist = successResult.data.playlist;
     if (!playlist) {
       const errorResult = { success: false, message: "No content found" };
-      
+
       // Cache the error result for 5 minutes
       cache.set(cacheKey, errorResult, 5 * 60 * 1000);
-      
+
       return res.json(errorResult);
     }
     // if series
@@ -58,10 +62,10 @@ export default async function getSeasonList(req: Request, res: Response) {
         success: true,
         data: { seasons, type: "tv" },
       };
-      
+
       // Cache the result for 30 minutes
       cache.set(cacheKey, result, 30 * 60 * 1000);
-      
+
       return res.json(result);
     } else {
       // if movie
@@ -80,23 +84,23 @@ export default async function getSeasonList(req: Request, res: Response) {
           type: "movie",
         },
       };
-      
+
       // Cache the result for 30 minutes
       cache.set(cacheKey, result, 30 * 60 * 1000);
-      
+
       return res.json(result);
     }
   } catch (err) {
     console.log("error: ", err);
-    
+
     const errorResult = {
       success: false,
       message: "Internal server error",
     };
-    
+
     // Cache the error result for 2 minutes
     cache.set(cacheKey, errorResult, 2 * 60 * 1000);
-    
+
     res.json(errorResult);
   }
 }
