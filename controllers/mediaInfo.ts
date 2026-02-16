@@ -54,35 +54,16 @@ export default async function mediaInfo(req: Request, res: Response) {
     }
 
     const uniqueCandidates = Array.from(new Set(candidates.filter(Boolean)));
-    console.log(`[mediaInfo] Multi-ID Parallel Resolution for ${requestedId}: ${uniqueCandidates.join(" & ")}`);
+    console.log(`[mediaInfo] ID candidates for ${requestedId}: ${uniqueCandidates.join(" -> ")}`);
 
-    // 💡 Performance Hack: Return as soon as we find a winner
-    const data = await new Promise<any>((resolve) => {
-      let finished = 0;
-      let bestFailure: any = null;
+    let data: any = { success: false, message: "Media not found" };
+    for (const candidate of uniqueCandidates) {
+      console.log(`Received request for ID: ${id} (Trying: ${candidate})`);
+      data = await getInfo(candidate);
+      if (data?.success) break;
+    }
 
-      if (uniqueCandidates.length === 0) return resolve({ success: false, message: "No IDs to search." });
-
-      uniqueCandidates.forEach(async (candidate) => {
-        try {
-          const res = await getInfo(candidate);
-          if (res?.success) {
-            resolve(res);
-          } else {
-            bestFailure = res;
-          }
-        } catch (err) {
-          bestFailure = { success: false, message: String(err) };
-        } finally {
-          finished++;
-          if (finished === uniqueCandidates.length) {
-            resolve(bestFailure || { success: false, message: "Media not found" });
-          }
-        }
-      });
-    });
-
-    console.log(`[mediaInfo] Response for ${requestedId}:`, data?.success ? "SUCCESS" : "FAILED");
+    console.log(`Response data:`, data);
 
     // Cache success briefly: upstream file/key tokens are short-lived and become invalid.
     if (data.success) {

@@ -63,77 +63,23 @@ export default async function proxy(req: Request, res: Response) {
 
     if (!targetUrl) return res.status(400).send("Missing target URL");
 
-    // 0. Loop Protection: Recursively unwrap anything pointing back to us
-    const isInternal = (url: string) => {
-        try {
-            const u = new URL(url.startsWith('http') ? url : `${protocol}://${host}${url.startsWith('/') ? '' : '/'}${url}`);
-            const isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '0.0.0.0';
-            const isOurHost = u.hostname === host.split(':')[0];
-            // Only consider it internal if it's our host AND it has one of our proxy paths
-            const lower = url.toLowerCase();
-            return (isLocal || isOurHost) && (lower.includes('/api/v1/proxy') || lower.includes('/stream/'));
-        } catch {
-            return false;
-        }
-    };
-
-    let iterations = 0;
-    while (targetUrl && isInternal(targetUrl) && iterations < 5) {
-        iterations++;
-        console.warn(`[Proxy] Unwrapping internal link: ${targetUrl}`);
-        // 1. Un-nest ?url=
+    // 0. Loop Protection: Don't proxy our own domain
+    if (targetUrl.includes(host)) {
+        console.warn(`[Proxy] Infinite loop detected for ${targetUrl}. Attempting to resolve internal link.`);
+        // Extract the nested URL if present
         const nestedMatch = targetUrl.match(/[?&]url=([^&]+)/);
         if (nestedMatch && nestedMatch[1]) {
             targetUrl = decodeURIComponent(nestedMatch[1]);
-            continue;
+        } else {
+            return res.status(400).send("Proxy Loop Detected");
         }
-        // 2. Un-nest /stream/path (catch base64 or plain)
-        const streamMatch = targetUrl.match(/\/stream\/([^?#/]+)/);
-        if (streamMatch && streamMatch[1]) {
-            let decoded = streamMatch[1];
-            // Try base64
-            if (!decoded.startsWith('http') && /^[A-Za-z0-9+/=]+$/.test(decoded)) {
-                try {
-                    const tmp = Buffer.from(decoded, 'base64').toString('utf-8');
-                    if (tmp.startsWith('http')) decoded = tmp;
-                } catch { }
-            }
-            if (decoded && decoded !== streamMatch[1] && decoded.startsWith('http')) {
-                targetUrl = decoded;
-                continue;
-            }
-        }
-        // If we found it's internal but can't unwrap to an external URL, it's a dead end/loop
-        break;
-    }
-
-    // Final Validation: Stop accidental self-proxying
-    if (isInternal(targetUrl)) {
-        console.error(`[Proxy] Infinite loop blocked: ${targetUrl}`);
-        return res.status(400).send("Proxy Loop Blocked");
-    }
-
-    if (!targetUrl || !targetUrl.startsWith('http')) {
-        if (targetUrl?.startsWith('//')) targetUrl = 'https:' + targetUrl;
-        else return res.status(400).send(`Invalid Proxy Target: ${targetUrl}`);
     }
 
     try {
         const urlObj = new URL(targetUrl);
         const targetHost = urlObj.hostname;
-
-        // Improved detection: identify manifests even without .m3u8 extension
-        const isM3U8 = targetUrl.includes(".m3u8") ||
-            targetUrl.includes("getm3u8") ||
-            targetUrl.includes("/playlist") ||
-            targetUrl.includes("m3u8") ||
-            req.query.type === 'm3u8';
-
-        const isSegment = targetUrl.includes(".ts") ||
-            targetUrl.includes(".m4s") ||
-            targetUrl.includes(".mp4") ||
-            targetUrl.includes(".aac") ||
-            targetUrl.includes("/segment");
+        const isM3U8 = targetUrl.includes(".m3u8") || req.query.type === 'm3u8';
+        const isSegment = targetUrl.includes(".ts") || targetUrl.includes(".m4s") || targetUrl.includes(".mp4") || targetUrl.includes(".aac");
         const proxyRef = (req.query.proxy_ref as string) || (req.headers.referer && !req.headers.referer.includes(host) ? req.headers.referer : undefined);
 
         // Cleanup stale host block cache
@@ -172,11 +118,8 @@ export default async function proxy(req: Request, res: Response) {
         };
 
         const tryFetch = async (useTor: boolean, refererOverride?: string) => {
-            const timeout = isSegment ? (useTor ? 30000 : 15000) : (useTor ? 15000 : 8000);
-
-            // Fetch everything as 'arraybuffer' first if it's likely a small manifest
-            // This allows us to check headers BEFORE deciding to treat as text or stream
-            const responseType = (isM3U8 && !isSegment) ? 'text' : 'stream';
+            const isFragile = targetUrl.includes('lizer123') || targetUrl.includes('getm3u8');
+            const timeout = isSegment ? (useTor ? 30000 : 15000) : (useTor ? 15000 : 6000);
 
             return await axios.get(targetUrl, {
                 headers: {
@@ -185,7 +128,7 @@ export default async function proxy(req: Request, res: Response) {
                 },
                 httpAgent: useTor ? torAgent : (urlObj.protocol === 'https:' ? undefined : keepAliveHttpAgent),
                 httpsAgent: useTor ? torAgent : (urlObj.protocol === 'https:' ? keepAliveHttpsAgent : undefined),
-                responseType: responseType,
+                responseType: isM3U8 ? 'text' : 'stream',
                 timeout: timeout,
                 maxRedirects: 5,
                 decompress: true,
@@ -212,16 +155,7 @@ export default async function proxy(req: Request, res: Response) {
 
         // --- MANIFEST REWRITING (The Heart of Audio Switching) ---
         if (isM3U8 || contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL') || (typeof response.data === 'string' && response.data.startsWith('#EXTM3U'))) {
-            let content = "";
-            if (typeof response.data === 'string') {
-                content = response.data;
-            } else if (Buffer.isBuffer(response.data)) {
-                content = response.data.toString('utf-8');
-            } else if (response.data && typeof response.data.toString === 'function') {
-                // If it's a stream or other object, we need to handle it carefully.
-                // However, tryFetch now returns 'text' if isM3U8 is true.
-                content = response.data.toString();
-            }
+            let content = typeof response.data === 'string' ? response.data : response.data.toString();
 
             // Capture Cookies
             const setCookie = response.headers["set-cookie"];
@@ -235,42 +169,25 @@ export default async function proxy(req: Request, res: Response) {
             const lines = content.split("\n");
             const proxySuffix = proxyRef ? `&proxy_ref=${encodeURIComponent(proxyRef)}` : "";
 
-            const isAlreadyProxied = (url: string) => {
-                const lower = url.toLowerCase();
-                const ourHost = host.split(':')[0].toLowerCase();
-                // Check if it already contains our proxy endpoint or domain + stream
-                return lower.includes(`${ourHost}/api/v1/proxy`) || lower.includes(`${ourHost}/stream/`);
-            };
-
-            const resolveAbs = (uri: string) => {
-                try {
-                    if (uri.startsWith('http')) return uri;
-                    // Always resolve against the EXTERNAL targetUrl
-                    return new URL(uri, targetUrl).href;
-                } catch {
-                    return uri;
-                }
-            };
-
             const rewrittenLines = lines.map((line: string) => {
                 const trimmed = line.trim();
                 if (!trimmed) return line;
 
                 if (trimmed.startsWith("#")) {
-                    // Tag Rewriting (Audio, Subtitles, Keys, Maps, etc.)
-                    // Matches: URI="...", SRC="...", or even unquoted URI=...
-                    return trimmed.replace(/(URI|SRC|EXT-X-MAP:URI|EXT-X-KEY:URI)=["']?([^"'\s,]+)["']?/g, (match: string, attr: string, uri: string) => {
-                        const abs = resolveAbs(uri);
-                        if (isAlreadyProxied(abs)) return match;
+                    // Tag Rewriting (Audio, Subtitles, Keys, Maps)
+                    // Matches attributes like URI="...", SRC="...", etc.
+                    return trimmed.replace(/(URI|SRC|EXT-X-MAP:URI|EXT-X-KEY:URI)=["']([^"']+)["']/g, (match: string, attr: string, uri: string) => {
+                        // Skip absolute URLs that are already proxied
+                        if (uri.includes(host)) return match;
+                        const abs = uri.startsWith("http") ? uri : new URL(uri, targetUrl).href;
                         return `${attr}="${proxyBase}${encodeURIComponent(abs)}${proxySuffix}"`;
                     });
                 }
 
-                // Path Rewriting (Segments, Variant Manifests, Audio Tracks)
-                // Filter: anything that doesn't start with '#' and looks like a URL or path
-                if (!trimmed.startsWith("#") && (trimmed.startsWith('http') || trimmed.includes('.') || trimmed.includes('/') || trimmed.includes('?'))) {
-                    const abs = resolveAbs(trimmed);
-                    if (isAlreadyProxied(abs)) return line;
+                // Path Rewriting (Segments, Variant Manifests)
+                if (trimmed.startsWith('http') || (!trimmed.includes(':') && trimmed.includes('.'))) {
+                    if (trimmed.includes(host)) return line; // Avoid double proxy
+                    const abs = trimmed.startsWith("http") ? trimmed : new URL(trimmed, targetUrl).href;
                     return `${proxyBase}${encodeURIComponent(abs)}${proxySuffix}`;
                 }
 
