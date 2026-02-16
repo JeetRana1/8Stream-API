@@ -17,29 +17,23 @@ export async function getMultiEmbedStream(id: string) {
 
         try {
             const res = await axios.get(embedUrl, { headers, timeout: 8000 });
-            // Look for m3u8 in the response
-            const m3u8Match = res.data.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi);
-            if (m3u8Match) {
-                return {
-                    success: true,
-                    data: {
-                        playlist: [{ title: "MultiEmbed Stream", file: m3u8Match[0], folder: [] }],
-                        key: "multiembed_direct",
-                        provider: "multiembed"
-                    }
-                };
+            const videoRegex = /https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm)[^\s"'<>]*\??[^\s"'<>]*/gi;
+            const matches = res.data.match(videoRegex) || [];
+            for (const v of matches) {
+                if (v.includes('.m3u8') || v.includes('.mp4')) {
+                    return {
+                        success: true,
+                        data: {
+                            playlist: [{ title: "MultiEmbed Stream", file: v, folder: [] }],
+                            key: "multiembed_direct",
+                            provider: "multiembed"
+                        }
+                    };
+                }
             }
         } catch { }
 
-        // Fallback to embed URL
-        return {
-            success: true,
-            data: {
-                playlist: [{ title: "MultiEmbed Player", file: embedUrl, folder: [] }],
-                key: "multiembed_embed",
-                provider: "multiembed"
-            }
-        };
+        return { success: false, message: "MultiEmbed: No direct stream found" };
 
     } catch (error: any) {
         return { success: false, message: `MultiEmbed Error: ${error.message}` };

@@ -1,5 +1,4 @@
 import axios from "axios";
-import * as cheerio from "cheerio";
 import { SocksProxyAgent } from 'socks-proxy-agent';
 
 const torAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
@@ -36,31 +35,23 @@ export async function getAutoEmbedStream(id: string) {
         const response = await fetchWithFallback(embedUrl);
         const body = response.data;
 
-        // AutoEmbed is hard to extract direct M3U8 from as it's an aggregator.
-        // But we can check if it has any obvious direct links.
-        const m3u8Match = body.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi);
-        if (m3u8Match) {
-            console.log(`[AutoEmbed] Found direct HLS: ${m3u8Match[0]}`);
-            return {
-                success: true,
-                data: {
-                    playlist: [{ title: "AutoEmbed Stream", file: m3u8Match[0], folder: [] }],
-                    key: "autoembed_direct",
-                    provider: "autoembed"
-                }
-            };
+        const videoRegex = /https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm)[^\s"'<>]*\??[^\s"'<>]*/gi;
+        const matches = body.match(videoRegex) || [];
+        for (const v of matches) {
+            if (v.includes('.m3u8') || v.includes('.mp4')) {
+                console.log(`[AutoEmbed] Found direct link: ${v}`);
+                return {
+                    success: true,
+                    data: {
+                        playlist: [{ title: "AutoEmbed Stream", file: v, folder: [] }],
+                        key: "autoembed_direct",
+                        provider: "autoembed"
+                    }
+                };
+            }
         }
 
-        // If no direct link, return the embed URL
-        // AutoEmbed works well in an iframe
-        return {
-            success: true,
-            data: {
-                playlist: [{ title: "AutoEmbed Player", file: embedUrl, folder: [] }],
-                key: "autoembed_embed",
-                provider: "autoembed"
-            }
-        };
+        return { success: false, message: "AutoEmbed: No direct stream found" };
 
     } catch (error: any) {
         console.error(`[AutoEmbed] Error:`, error.message);

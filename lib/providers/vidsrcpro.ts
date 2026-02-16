@@ -18,28 +18,23 @@ export async function getVidSrcProStream(id: string) {
         try {
             const res = await axios.get(embedUrl, { headers, timeout: 8000 });
             // Look for the source in the script
-            const m3u8Match = res.data.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi);
-            if (m3u8Match) {
-                return {
-                    success: true,
-                    data: {
-                        playlist: [{ title: "VidSrc Pro", file: m3u8Match[0], folder: [] }],
-                        key: "vidsrcpro_direct",
-                        provider: "vidsrcpro"
-                    }
-                };
+            const videoRegex = /https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm)[^\s"'<>]*\??[^\s"'<>]*/gi;
+            const matches = res.data.match(videoRegex) || [];
+            for (const v of matches) {
+                if (v.includes('.m3u8') || v.includes('.mp4')) {
+                    return {
+                        success: true,
+                        data: {
+                            playlist: [{ title: "VidSrc Pro", file: v, folder: [] }],
+                            key: "vidsrcpro_direct",
+                            provider: "vidsrcpro"
+                        }
+                    };
+                }
             }
         } catch { }
 
-        // Fallback to embed URL
-        return {
-            success: true,
-            data: {
-                playlist: [{ title: "VidSrc Pro Player", file: embedUrl, folder: [] }],
-                key: "vidsrcpro_embed",
-                provider: "vidsrcpro"
-            }
-        };
+        return { success: false, message: "VidSrcPro: No direct stream found" };
 
     } catch (error: any) {
         return { success: false, message: `VidSrcPro Error: ${error.message}` };
