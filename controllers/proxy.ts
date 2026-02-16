@@ -229,43 +229,28 @@ export default async function proxy(req: Request, res: Response) {
             }
         };
 
-        if (isM3U8) {
-            // Manifest: Try Direct first, then Tor
-            if (!preferTor) {
-                try {
-                    response = await executeFetch(false);
-                } catch {
-                    console.log(`[Proxy Manifest] Direct failed, retrying via Tor for ${targetUrl}`);
-                    response = await executeFetch(true);
-                }
-            } else {
-                try {
-                    response = await executeFetch(true);
-                } catch {
-                    response = await executeFetch(false);
-                }
-            }
-        } else {
-            // Segment: Try Direct first, then Tor
-            if (!preferTor) {
-                try {
-                    response = await axios.get(targetUrl, {
-                        headers: getProxyHeaders(targetUrl),
-                        timeout: 5000,
-                        responseType: 'arraybuffer',
-                        validateStatus: (s) => s < 400
-                    });
-                } catch (e: any) {
-                    console.log(`[Proxy Segment] Direct failed for ${targetUrl.substring(0, 40)}. Falling back to Tor...`);
-                    response = await executeFetch(true);
-                }
-            } else {
-                try {
-                    response = await executeFetch(true);
-                } catch {
-                    response = await executeFetch(false);
-                }
-            }
+        // Unified Racing Strategy: Always race Direct vs Tor
+        // This ensures:
+        // 1. alignment with whichever IP generated the link (fixing 404s)
+        // 2. minimum latency (instant playback)
+        // 3. automatic fallback if one lane fails
+
+        try {
+            const directP = executeFetch(false).then(r => ({ r, lane: 'direct' }));
+            const torP = executeFetch(true).then(r => ({ r, lane: 'tor' }));
+
+            // Promise.any waits for the first FULFILLED promise.
+            // If Direct fails fast (403/404), it waits for Tor.
+            // If both succeed, the faster one wins.
+            const winner = await Promise.any([directP, torP]);
+            response = winner.r;
+
+            // Optional: Log if we used Tor when not preferred, or vice versa (for debugging)
+            // if (winner.lane === 'tor' && !preferTor) console.log(`[Proxy] Tor won for non-preferred ${targetUrl.substring(0,30)}`);
+
+        } catch (e: any) {
+            // Both failed
+            throw new Error("Unreachable via Direct or Tor (All lanes failed)");
         }
 
         if (!response) throw new Error("Fetch yielded no response");
