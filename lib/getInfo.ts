@@ -70,21 +70,28 @@ export default async function getInfo(id: string) {
 
               try {
                 response = await axios.get(targetUrl, fetchOptions);
+                console.log(`[getInfo] Fetch Success: ${targetUrl} (${response.data ? String(response.data).length : 0} bytes)`);
               } catch (err: any) {
                 if (!useTor && (err.code === 'ECONNABORTED' || err.response?.status === 403 || err.response?.status === 404)) {
-                  // Some mirrors might return 404 for certain IDs, we ignore and try others
+                  console.warn(`[getInfo] Fetch Failed (Retryable): ${targetUrl} - ${err.message}`);
                   return;
-                } else return;
+                } else {
+                  console.error(`[getInfo] Fetch Error: ${targetUrl} - ${err.response?.status || err.code}`);
+                  return;
+                }
               }
 
               if (!response || !response.data) return;
 
               const html = String(response.data);
               // Broader check for metadata: file, sources, playlist, etc.
-              if (!html.includes("file") && !html.includes("sources") && !html.includes("playlist")) return;
+              if (!html.includes("file") && !html.includes("sources") && !html.includes("playlist")) {
+                return;
+              }
 
               const $ = cheerio.load(html);
               const scripts = $("script").map((i, el) => $(el).html()).get();
+              console.log(`[getInfo] Found ${scripts.length} scripts at ${targetUrl}`);
 
               for (const script of scripts) {
                 if (resolvedData) return;
@@ -95,6 +102,7 @@ export default async function getInfo(id: string) {
                 const keyMatch = script.match(/["']?key["']?\s*[:=]\s*["']([^"']+)["']/);
 
                 if (fileMatch && fileMatch[2]) {
+                  console.log(`[getInfo] Match found in script! file: ${fileMatch[2].substring(0, 50)}...`);
                   foundPotentialMetadata = true;
                   let file = fileMatch[2].replace(/\\\//g, "/"); // Unescape JSON-escaped slashes
                   const key = (keyMatch ? keyMatch[2] : "").replace(/\\\//g, "/");
@@ -107,10 +115,25 @@ export default async function getInfo(id: string) {
                     } catch { }
                   }
 
-                  let playlistUrl = file.startsWith("http") ? file : (file.startsWith('//') ? `https:${file}` : `${domain}${file.startsWith('/') ? '' : '/'}${file}`);
-
-                  // Safer Sanitization: replace double slashes except after protocol
-                  playlistUrl = playlistUrl.replace(/([^:])\/\//g, "$1/");
+                  let playlistUrl = "";
+                  try {
+                    if (file.startsWith("http")) {
+                      playlistUrl = file;
+                    } else if (file.startsWith("//")) {
+                      playlistUrl = `https:${file}`;
+                    } else {
+                      // Use URL constructor for safe joining
+                      const base = new URL(domain.startsWith('http') ? domain : `https://${domain}`);
+                      playlistUrl = new URL(file, base).href;
+                    }
+                    // Final sanitization of any weird double slashes in path (safely)
+                    const u = new URL(playlistUrl);
+                    u.pathname = u.pathname.replace(/\/+/g, '/');
+                    playlistUrl = u.href;
+                  } catch (err) {
+                    console.error(`[getInfo] URL Construction failed for file=${file}, domain=${domain}`);
+                    playlistUrl = file;
+                  }
 
                   try {
                     console.log(`[getInfo] Validating playlist: ${playlistUrl} for ID: ${id}`);
