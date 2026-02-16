@@ -36,16 +36,10 @@ export async function getVidSrcStream(id: string) {
                     };
                     try {
                         const res = await axios.get(url, { headers, timeout: 10000 });
-                        if (res.status === 404) throw new Error("404");
                         return res;
                     } catch (err: any) {
                         const status = err.response?.status;
-                        if (status === 403 || status === 429 || !err.response || err.message === '404') {
-                            if (err.message === '404' && !url.includes('rcp')) {
-                                // Don't Tor fallback 404s for main domains usually, but VidSrc is weird
-                                console.log(`[VidSrc] 404 on ${url}, skipping or trying mirror`);
-                                throw err;
-                            }
+                        if (status === 403 || status === 429 || status === 404 || !err.response) {
                             console.log(`[VidSrc] Direct failed/blocked (${status || err.message}), trying Tor for ${url}`);
                             return await axios.get(url, {
                                 headers,
@@ -68,7 +62,6 @@ export async function getVidSrcStream(id: string) {
                     if (src) candidateUrls.push(src);
                 });
 
-                // Also look for window.location or similar in scripts
                 const scriptText = $('script').text();
                 const urlInScript = scriptText.match(/https?:\/\/[^\s"'<>]+/g) || [];
                 urlInScript.forEach(u => {
@@ -77,7 +70,6 @@ export async function getVidSrcStream(id: string) {
                     }
                 });
 
-                // Unique and normalized URLs
                 const uniqueUrls = Array.from(new Set(candidateUrls.map(u => {
                     if (u.startsWith('//')) return 'https:' + u;
                     if (!u.startsWith('http')) return domain + (u.startsWith('/') ? u : '/' + u);
@@ -90,31 +82,30 @@ export async function getVidSrcStream(id: string) {
                         const innerRes = await fetchWithFallback(innerUrl, embedUrl);
                         const body = typeof innerRes.data === 'string' ? innerRes.data : JSON.stringify(innerRes.data);
 
-                        // DEEP SCAN STRATEGY
+                        // DEEP SCAN STRATEGIES
 
-                        // 1. Look for direct .m3u8 URLs (even in complex strings)
-                        const m3u8Regex = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*\??[^\s"'<>]*/gi;
-                        const m3u8Matches = body.match(m3u8Regex) || [];
-                        for (const m of m3u8Matches) {
-                            console.log(`[VidSrc] FOUND DIRECT HLS: ${m}`);
+                        // 1. Direct video URLs (m3u8, mp4, mkv, webm)
+                        const videoRegex = /https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm)[^\s"'<>]*\??[^\s"'<>]*/gi;
+                        const videoMatches = body.match(videoRegex) || [];
+                        for (const v of videoMatches) {
+                            console.log(`[VidSrc] FOUND VIDEO URL: ${v}`);
                             return {
                                 success: true,
                                 data: {
-                                    playlist: [{ title: "VidSrc High", file: m, folder: [] }],
+                                    playlist: [{ title: "VidSrc Video", file: v, folder: [] }],
                                     key: "vidsrc_direct",
                                     provider: "vidsrc"
                                 }
                             };
                         }
 
-                        // 2. Look for Base64 encoded URLs (very common in cloudnestra/vidsrc)
-                        // This regex looks for base64 blocks that might contain URLs
+                        // 2. Base64 encoded URLs
                         const b64Pattern = /["']([A-Za-z0-9+/=]{100,})["']/g;
                         let b64Match;
                         while ((b64Match = b64Pattern.exec(body)) !== null) {
                             try {
                                 const decoded = Buffer.from(b64Match[1], 'base64').toString('utf8');
-                                const subMatches = decoded.match(m3u8Regex) || decoded.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/gi) || [];
+                                const subMatches = decoded.match(videoRegex) || [];
                                 for (const sm of subMatches) {
                                     console.log(`[VidSrc] FOUND B64 DECODED URL: ${sm}`);
                                     return {
@@ -129,12 +120,12 @@ export async function getVidSrcStream(id: string) {
                             } catch { }
                         }
 
-                        // 3. Look for "file" or "sources" in JSON-like structures
-                        const jsonSearch = /file\s*:\s*["']([^"']+)["']/gi;
+                        // 3. JSON/Object 'file' properties
+                        const jsonSearch = /["']?file["']?\s*:\s*["']([^"']+)["']/gi;
                         let jMatch;
                         while ((jMatch = jsonSearch.exec(body)) !== null) {
                             let fUrl = jMatch[1];
-                            if (fUrl.includes('.m3u8') || fUrl.includes('.mp4')) {
+                            if (fUrl.includes('.m3u8') || fUrl.includes('.mp4') || fUrl.includes('.mkv') || fUrl.includes('.webm')) {
                                 if (fUrl.startsWith('//')) fUrl = 'https:' + fUrl;
                                 console.log(`[VidSrc] FOUND JSON FILE: ${fUrl}`);
                                 return {
@@ -148,7 +139,27 @@ export async function getVidSrcStream(id: string) {
                             }
                         }
 
-                        // 4. Look for ajax endpoints that might return the source
+                        // 4. HTML5 source tags
+                        const sourceTags = body.match(/<source[^>]+src=["']([^"']+)["']/gi);
+                        if (sourceTags) {
+                            for (const tag of sourceTags) {
+                                let sUrl = tag.match(/src=["']([^"']+)["']/i)?.[1];
+                                if (sUrl && (sUrl.includes('.m3u8') || sUrl.includes('.mp4') || sUrl.includes('.mkv') || sUrl.includes('.webm'))) {
+                                    if (sUrl.startsWith('//')) sUrl = 'https:' + sUrl;
+                                    console.log(`[VidSrc] FOUND SOURCE TAG: ${sUrl}`);
+                                    return {
+                                        success: true,
+                                        data: {
+                                            playlist: [{ title: "VidSrc Source", file: sUrl, folder: [] }],
+                                            key: "vidsrc_direct",
+                                            provider: "vidsrc"
+                                        }
+                                    };
+                                }
+                            }
+                        }
+
+                        // 5. AJAX endpoints
                         const ajaxSearch = /\/ajax\/(?:embed|v2)\/source\/[A-Za-z0-9]+/i;
                         const aj = body.match(ajaxSearch);
                         if (aj) {
@@ -169,12 +180,10 @@ export async function getVidSrcStream(id: string) {
                                 }
                             } catch { }
                         }
-
                     } catch (e: any) {
                         console.log(`[VidSrc] Failed analyzing ${innerUrl}: ${e.message}`);
                     }
                 }
-
             } catch (e: any) {
                 console.log(`[VidSrc] Failed domain ${domain}: ${e.message}`);
             }
