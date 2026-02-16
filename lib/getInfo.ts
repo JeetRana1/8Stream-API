@@ -96,8 +96,8 @@ export default async function getInfo(id: string) {
 
                 if (fileMatch && fileMatch[2]) {
                   foundPotentialMetadata = true;
-                  let file = fileMatch[2];
-                  const key = keyMatch ? keyMatch[2] : "";
+                  let file = fileMatch[2].replace(/\\\//g, "/"); // Unescape JSON-escaped slashes
+                  const key = (keyMatch ? keyMatch[2] : "").replace(/\\\//g, "/");
 
                   // Handle potential Base64 encoding
                   if (!file.startsWith('http') && !file.startsWith('/') && !file.includes('.') && /^[A-Za-z0-9+/=]+$/.test(file)) {
@@ -108,6 +108,9 @@ export default async function getInfo(id: string) {
                   }
 
                   let playlistUrl = file.startsWith("http") ? file : (file.startsWith('//') ? `https:${file}` : `${domain}${file.startsWith('/') ? '' : '/'}${file}`);
+
+                  // Final sanitization: ensure no lingering backslashes in the hostname part
+                  playlistUrl = playlistUrl.replace(/([^:])\/\//g, '$1/');
 
                   try {
                     console.log(`[getInfo] Validating playlist: ${playlistUrl} for ID: ${id}`);
