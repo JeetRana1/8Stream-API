@@ -35,7 +35,7 @@ app.get("/", (req, res) => {
 app.get("/admin/clear-cache", (req, res) => {
   const adminKey = process.env.ADMIN_KEY || "admin123"; // Default key for development
   const providedKey = req.query.key as string;
-  
+
   if (providedKey === adminKey) {
     cache.clear();
     res.json({ success: true, message: "Cache cleared successfully" });
@@ -49,7 +49,7 @@ import proxy from "./controllers/proxy";
 app.all("/stream/*", proxy);
 app.use("/api/v1", router);
 
-const Port = process.env.PORT || 7860;
+const Port = process.env.PORT || 8000;
 
 app.listen(Port, () => {
   console.log(`Server running on port ${Port}`);

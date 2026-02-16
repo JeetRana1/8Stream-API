@@ -179,7 +179,7 @@ export default async function proxy(req: Request, res: Response) {
 
         const tryFetch = async (useTor: boolean, refererOverride?: string, customTimeout?: number) => {
             // For streams, we can use a shorter connection timeout because we only wait for headers
-            const timeout = customTimeout || (isSegment ? (useTor ? 12000 : 6000) : (useTor ? 12000 : 6000));
+            const timeout = customTimeout || (isSegment ? (useTor ? 30000 : 8000) : (useTor ? 30000 : 8000));
             return await axios.get(targetUrl, {
                 headers: getProxyHeaders(targetUrl, refererOverride),
                 httpAgent: useTor ? torAgent : undefined,
@@ -195,9 +195,14 @@ export default async function proxy(req: Request, res: Response) {
             try {
                 return await tryFetch(tor);
             } catch (err: any) {
-                // If it's a 403/401, we want to know so we can try the other lane
-                err.isAuthError = err.response?.status === 403 || err.response?.status === 401;
-                throw err;
+                // Return structured error instead of just throwing, for logging
+                const method = tor ? 'Tor' : 'Direct';
+                const status = err.response?.status || 'Active';
+                const reason = err.message || 'Unknown';
+                // Rethrow enriched error to be caught by Promise.any
+                const enrichedError = new Error(`${method} failed: ${status} - ${reason}`);
+                (enrichedError as any).isAuthError = status === 403 || status === 401;
+                throw enrichedError;
             }
         };
 
@@ -224,7 +229,9 @@ export default async function proxy(req: Request, res: Response) {
             response = winner.r;
 
         } catch (e: any) {
-            throw new Error("Unreachable via Direct or Tor (All lanes failed)");
+            const reasons = (e.errors || []).map((err: any) => err.message).join(' | ');
+            console.error(`[Proxy Race Failed] ${reasons} for ${targetUrl}`);
+            throw new Error(`Unreachable: ${reasons}`);
         }
 
         if (!response) throw new Error("Fetch yielded no response");
