@@ -9,14 +9,18 @@ export async function getVidSrcStream(id: string) {
         const cleanId = id.replace('tt', '');
         const isImdb = id.startsWith('tt');
 
-        // Prime domains for VidSrc
+        // Prime domains for VidSrc and its various mirrors/clones
         const domains = [
             'https://vidsrc.to',
             'https://vidsrc.me',
             'https://vidsrc.cc',
             'https://vidsrc.net',
             'https://vidsrc.xyz',
-            'https://vidsrc.pm'
+            'https://vidsrc.pm',
+            'https://vidsrc.su',
+            'https://vidsrc.in',
+            'https://vidsrc.stream',
+            'https://vidsrcme.ru'
         ];
 
         for (const domain of domains) {
@@ -35,17 +39,18 @@ export async function getVidSrcStream(id: string) {
                         "Cache-Control": "no-cache"
                     };
                     try {
-                        const res = await axios.get(url, { headers, timeout: 10000 });
+                        const res = await axios.get(url, { headers, timeout: 12000 });
                         return res;
                     } catch (err: any) {
                         const status = err.response?.status;
-                        if (status === 403 || status === 429 || status === 404 || !err.response) {
+                        // Always try Tor for 403, 429, or cloudflare blocks
+                        if (status === 403 || status === 429 || !err.response || err.code === 'ECONNABORTED') {
                             console.log(`[VidSrc] Direct failed/blocked (${status || err.message}), trying Tor for ${url}`);
                             return await axios.get(url, {
                                 headers,
                                 httpAgent: torAgent,
                                 httpsAgent: torAgent,
-                                timeout: 25000
+                                timeout: 30000
                             });
                         }
                         throw err;
@@ -57,15 +62,16 @@ export async function getVidSrcStream(id: string) {
 
                 // Collect all potential player/iframe URLs
                 const candidateUrls: string[] = [];
-                $('iframe').each((_, el) => {
+                $('iframe, embed, object').each((_, el) => {
                     const src = $(el).attr('data-src') || $(el).attr('src');
                     if (src) candidateUrls.push(src);
                 });
 
+                // Scan scripts for URLs
                 const scriptText = $('script').text();
                 const urlInScript = scriptText.match(/https?:\/\/[^\s"'<>]+/g) || [];
                 urlInScript.forEach(u => {
-                    if (u.includes('embed') || u.includes('player') || u.includes('rcp')) {
+                    if (u.includes('embed') || u.includes('player') || u.includes('rcp') || u.includes('source') || u.includes('cloudnestra')) {
                         candidateUrls.push(u);
                     }
                 });
@@ -77,37 +83,37 @@ export async function getVidSrcStream(id: string) {
                 })));
 
                 for (const innerUrl of uniqueUrls) {
-                    console.log(`[VidSrc] Analyzing candidate: ${innerUrl}`);
+                    console.log(`[VidSrc] Looking for stream in: ${innerUrl}`);
                     try {
                         const innerRes = await fetchWithFallback(innerUrl, embedUrl);
                         const body = typeof innerRes.data === 'string' ? innerRes.data : JSON.stringify(innerRes.data);
 
-                        // DEEP SCAN STRATEGIES
-
-                        // 1. Direct video URLs (m3u8, mp4, mkv, webm)
-                        const videoRegex = /https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm)[^\s"'<>]*\??[^\s"'<>]*/gi;
+                        // 1. Regex for common video extensions
+                        const videoRegex = /https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4|mkv|webm|ts)[^\s"'<>]*\??[^\s"'<>]*/gi;
                         const videoMatches = body.match(videoRegex) || [];
                         for (const v of videoMatches) {
-                            console.log(`[VidSrc] FOUND VIDEO URL: ${v}`);
-                            return {
-                                success: true,
-                                data: {
-                                    playlist: [{ title: "VidSrc Video", file: v, folder: [] }],
-                                    key: "vidsrc_direct",
-                                    provider: "vidsrc"
-                                }
-                            };
+                            if (!v.includes('fonts.gstatic.com')) {
+                                console.log(`[VidSrc] FOUND DIRECT VIDEO: ${v}`);
+                                return {
+                                    success: true,
+                                    data: {
+                                        playlist: [{ title: "VidSrc HD", file: v, folder: [] }],
+                                        key: "vidsrc_direct",
+                                        provider: "vidsrc"
+                                    }
+                                };
+                            }
                         }
 
-                        // 2. Base64 encoded URLs
-                        const b64Pattern = /["']([A-Za-z0-9+/=]{100,})["']/g;
+                        // 2. Base64 Decoder
+                        const b64Search = /["']([A-Za-z0-9+/=]{60,})["']/g;
                         let b64Match;
-                        while ((b64Match = b64Pattern.exec(body)) !== null) {
+                        while ((b64Match = b64Search.exec(body)) !== null) {
                             try {
                                 const decoded = Buffer.from(b64Match[1], 'base64').toString('utf8');
                                 const subMatches = decoded.match(videoRegex) || [];
                                 for (const sm of subMatches) {
-                                    console.log(`[VidSrc] FOUND B64 DECODED URL: ${sm}`);
+                                    console.log(`[VidSrc] FOUND B64 VIDEO: ${sm}`);
                                     return {
                                         success: true,
                                         data: {
@@ -120,59 +126,23 @@ export async function getVidSrcStream(id: string) {
                             } catch { }
                         }
 
-                        // 3. JSON/Object 'file' properties
-                        const jsonSearch = /["']?file["']?\s*:\s*["']([^"']+)["']/gi;
-                        let jMatch;
-                        while ((jMatch = jsonSearch.exec(body)) !== null) {
-                            let fUrl = jMatch[1];
-                            if (fUrl.includes('.m3u8') || fUrl.includes('.mp4') || fUrl.includes('.mkv') || fUrl.includes('.webm')) {
-                                if (fUrl.startsWith('//')) fUrl = 'https:' + fUrl;
-                                console.log(`[VidSrc] FOUND JSON FILE: ${fUrl}`);
-                                return {
-                                    success: true,
-                                    data: {
-                                        playlist: [{ title: "VidSrc JSON", file: fUrl, folder: [] }],
-                                        key: "vidsrc_direct",
-                                        provider: "vidsrc"
-                                    }
-                                };
-                            }
-                        }
-
-                        // 4. HTML5 source tags
-                        const sourceTags = body.match(/<source[^>]+src=["']([^"']+)["']/gi);
-                        if (sourceTags) {
-                            for (const tag of sourceTags) {
-                                let sUrl = tag.match(/src=["']([^"']+)["']/i)?.[1];
-                                if (sUrl && (sUrl.includes('.m3u8') || sUrl.includes('.mp4') || sUrl.includes('.mkv') || sUrl.includes('.webm'))) {
-                                    if (sUrl.startsWith('//')) sUrl = 'https:' + sUrl;
-                                    console.log(`[VidSrc] FOUND SOURCE TAG: ${sUrl}`);
-                                    return {
-                                        success: true,
-                                        data: {
-                                            playlist: [{ title: "VidSrc Source", file: sUrl, folder: [] }],
-                                            key: "vidsrc_direct",
-                                            provider: "vidsrc"
-                                        }
-                                    };
-                                }
-                            }
-                        }
-
-                        // 5. AJAX endpoints
-                        const ajaxSearch = /\/ajax\/(?:embed|v2)\/source\/[A-Za-z0-9]+/i;
-                        const aj = body.match(ajaxSearch);
-                        if (aj) {
+                        // 3. AJAX source endpoints (very common)
+                        const ajaxSearch = /\/ajax\/(?:embed|v2|source)\/[A-Za-z0-9]+/gi;
+                        const ajaxMatches = body.match(ajaxSearch) || [];
+                        for (const ajPath of ajaxMatches) {
                             const baseUrl = innerUrl.split('/').slice(0, 3).join('/');
-                            const ajaxUrl = baseUrl + aj[0];
-                            console.log(`[VidSrc] Requesting AJAX source: ${ajaxUrl}`);
+                            const ajaxUrl = baseUrl + ajPath;
+                            console.log(`[VidSrc] Testing AJAX source: ${ajaxUrl}`);
                             try {
                                 const ajRes = await fetchWithFallback(ajaxUrl, innerUrl);
-                                if (ajRes.data && ajRes.data.url) {
+                                const ajData = typeof ajRes.data === 'string' ? JSON.parse(ajRes.data) : ajRes.data;
+                                if (ajData.url || ajData.file || ajData.source) {
+                                    const rawUrl = ajData.url || ajData.file || ajData.source;
+                                    console.log(`[VidSrc] FOUND FROM AJAX: ${rawUrl}`);
                                     return {
                                         success: true,
                                         data: {
-                                            playlist: [{ title: "VidSrc AJAX", file: ajRes.data.url, folder: [] }],
+                                            playlist: [{ title: "VidSrc Master", file: rawUrl, folder: [] }],
                                             key: "vidsrc_direct",
                                             provider: "vidsrc"
                                         }
@@ -180,18 +150,19 @@ export async function getVidSrcStream(id: string) {
                                 }
                             } catch { }
                         }
+
                     } catch (e: any) {
-                        console.log(`[VidSrc] Failed analyzing ${innerUrl}: ${e.message}`);
+                        console.log(`[VidSrc] Inner scan failed: ${e.message}`);
                     }
                 }
             } catch (e: any) {
-                console.log(`[VidSrc] Failed domain ${domain}: ${e.message}`);
+                console.log(`[VidSrc] Domain ${domain} failed: ${e.message}`);
             }
         }
 
-        return { success: false, message: "VidSrc: No streams found after exhaustive scan" };
+        return { success: false, message: "VidSrc: No streams found after full crawl" };
     } catch (error: any) {
-        console.error(`[VidSrc] Critical Error:`, error.message);
+        console.error(`[VidSrc] Crawler Error:`, error.message);
         return { success: false, message: `VidSrc Error: ${error.message}` };
     }
 }

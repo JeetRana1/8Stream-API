@@ -1,5 +1,8 @@
 import getAllMovieLandStream from "./providers/allmovieland";
 import { getVidSrcStream } from "./providers/vidsrc";
+import { getVidSrcProStream } from "./providers/vidsrcpro";
+import { getAutoEmbedStream } from "./providers/autoembed";
+import { getMultiEmbedStream } from "./providers/multiembed";
 
 /**
  * Multi-provider stream resolver
@@ -9,11 +12,12 @@ export default async function getInfo(id: string) {
     console.log(`[getInfo] Searching for streams for ID: ${id}`);
 
     // Define provider priority order
-    // AllMovieLand first (primary provider)
-    // Then fallback to VidSrc
     const providers = [
         { name: "AllMovieLand", fn: getAllMovieLandStream },
-        { name: "VidSrc", fn: getVidSrcStream }
+        { name: "VidSrc", fn: getVidSrcStream },
+        { name: "VidSrcPro", fn: getVidSrcProStream },
+        { name: "MultiEmbed", fn: getMultiEmbedStream },
+        { name: "AutoEmbed", fn: getAutoEmbedStream }
     ];
 
     const errors: string[] = [];
