@@ -103,20 +103,25 @@ export default async function getInfo(id: string) {
                   if (!file.startsWith('http') && !file.startsWith('/') && !file.includes('.') && /^[A-Za-z0-9+/=]+$/.test(file)) {
                     try {
                       const decoded = Buffer.from(file, 'base64').toString('utf-8');
-                      if (decoded.startsWith('http') || decoded.startsWith('/')) file = decoded;
+                      if (decoded.startsWith('http') || decoded.startsWith('/') || decoded.includes('.m3u8')) file = decoded;
                     } catch { }
                   }
 
                   let playlistUrl = file.startsWith("http") ? file : (file.startsWith('//') ? `https:${file}` : `${domain}${file.startsWith('/') ? '' : '/'}${file}`);
 
-                  // Final sanitization: ensure no lingering backslashes in the hostname part
-                  playlistUrl = playlistUrl.replace(/([^:])\/\//g, '$1/');
+                  // Safer Sanitization: replace double slashes except after protocol
+                  playlistUrl = playlistUrl.replace(/([^:])\/\//g, "$1/");
 
                   try {
                     console.log(`[getInfo] Validating playlist: ${playlistUrl} for ID: ${id}`);
                     const playlistRes = await axios.get(playlistUrl, {
-                      headers: { "User-Agent": headers["User-Agent"], "Referer": targetUrl, "X-Csrf-Token": key || "0" },
-                      timeout: 10000
+                      headers: {
+                        "User-Agent": headers["User-Agent"],
+                        "Referer": targetUrl,
+                        "X-Csrf-Token": key || "0",
+                        "Accept": "*/*"
+                      },
+                      timeout: 12000
                     });
 
                     let playlist: any[] = [];
@@ -124,7 +129,7 @@ export default async function getInfo(id: string) {
                       playlist = playlistRes.data;
                     } else if (playlistRes.data && typeof playlistRes.data === 'object' && playlistRes.data.list) {
                       playlist = playlistRes.data.list;
-                    } else if (typeof playlistRes.data === 'string' && (playlistRes.data.includes('#EXTM3U') || playlistRes.data.includes('playlist'))) {
+                    } else if (typeof playlistRes.data === 'string' && (playlistRes.data.includes('#EXTM3U') || playlistRes.data.includes('playlist') || playlistRes.data.includes('m3u8'))) {
                       // It's a direct HLS manifest! Convert to internal format
                       playlist = [{ file: playlistUrl, label: "Auto", type: "hls" }];
                     }
@@ -137,10 +142,12 @@ export default async function getInfo(id: string) {
                       return;
                     }
                   } catch (e: any) {
-                    console.warn(`[getInfo] Failed to fetch playlist from ${playlistUrl}: ${e.message}`);
-                    // Last ditch effort: if it failed but we have a key and it looks like a direct link
-                    if (file.includes('.m3u8')) {
-                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream", type: "hls" }], key } };
+                    console.warn(`[getInfo] Validation failed for ${playlistUrl}: ${e.message}`);
+
+                    // Fallback: If it's a direct .m3u8 link, try to use it even if validation fetch failed (might be CORS or referer issues on our end)
+                    if (playlistUrl.includes('.m3u8') && !resolvedData) {
+                      console.log(`[getInfo] Using fallback HLS link: ${playlistUrl}`);
+                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream (Fallback)", type: "hls" }], key } };
                       return;
                     }
                   }
