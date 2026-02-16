@@ -1,18 +1,13 @@
 import axios from "axios";
 import { Request, Response } from "express";
-import {
-    torAgent,
-    keepAliveHttpAgent,
-    keepAliveHttpsAgent,
-    hostNeedsTor,
-    HOST_BLOCK_TTL,
-    shouldPreferTor
-} from "../lib/proxyAgents";
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { getPlayerUrl } from "../lib/getPlayerUrl";
 
+const torAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
 const manifestCookieJar = new Map<string, { cookie: string; timestamp: number }>();
 const MANIFEST_COOKIE_TTL_MS = 30 * 60 * 1000;
 const manifestResponseCache = new Map<string, { body: string; expiresAt: number }>();
-const MANIFEST_CACHE_TTL_MS = 30000; // Increased to 30s for better stability
+const MANIFEST_CACHE_TTL_MS = 8000;
 
 function extractCookieHeader(setCookieHeader: string[] | undefined): string {
     if (!setCookieHeader || !setCookieHeader.length) return "";
@@ -42,6 +37,21 @@ function getJarCookie(proxyRef: string | undefined): string {
     return "";
 }
 
+function shouldPreferTor(url: string): boolean {
+    const lower = url.toLowerCase();
+    return (
+        lower.includes("heast404jax.com") ||
+        lower.includes("i-arch-") ||
+        lower.includes("/stream2/") ||
+        lower.includes("i-cdn-") ||
+        lower.includes("lizer123.site")
+    );
+}
+
+/**
+ * Proxy controller optimized for stability and reliability.
+ * Reverted to pure-Tor for data integrity while keeping HLS rewriting.
+ */
 export default async function proxy(req: Request, res: Response) {
     let targetUrl = req.query.url as string;
     const host = req.get('host') || "";
@@ -50,7 +60,9 @@ export default async function proxy(req: Request, res: Response) {
     const proxyBase = `${protocol}://${host}/api/v1/proxy?url=`;
 
     // 0. Safety Valve: Smart Passthrough for Fragile Audio Providers (via Tor)
+    // If we detect lizer123 or similar audio hosts, we turn off all "smart" features and use Tor
     if (targetUrl && (targetUrl.includes('lizer123') || targetUrl.includes('getm3u8'))) {
+        console.log(`[Proxy Raw] Tor Passthrough for fragile audio: ${targetUrl}`);
         try {
             const rawRes = await axios.get(targetUrl, {
                 responseType: 'arraybuffer', // Fetch as buffer to inspect content
@@ -72,196 +84,401 @@ export default async function proxy(req: Request, res: Response) {
             });
 
             // Handle Redirections properly
+            const finalUrl = rawRes.request.res.responseUrl || targetUrl;
             const contentType = rawRes.headers['content-type'];
 
-            res.setHeader('Content-Type', contentType || 'application/octet-stream');
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.send(rawRes.data);
-            return;
+            // If it's a manifest, we MUST rewrite it to fix relative paths
+            if (contentType && (contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL') || finalUrl.includes('.m3u8'))) {
+                console.log(`[Proxy Raw] Detected Manifest in Passthrough. Rewriting from ${finalUrl}...`);
+                let content = rawRes.data.toString('utf-8');
+                const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
+                // Self-reference as referer for segments
+                const refParam = `&proxy_ref=${encodeURIComponent(finalUrl)}`;
+
+                const rewrittenLines = content.split('\n').map((line: string) => {
+                    const trimmed = line.trim();
+                    if (!trimmed) return line;
+
+                    if (trimmed.startsWith('#')) return line;
+
+                    // Rewrite segment/playlist URL
+                    const absUrl = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
+                    return `${proxyBase}${encodeURIComponent(absUrl)}${refParam}`;
+                });
+
+                res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+                res.setHeader("Access-Control-Allow-Origin", "*");
+                return res.send(rewrittenLines.join('\n'));
+            }
+
+            // If binary/segment, send as is
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+            res.setHeader("Content-Type", contentType || 'application/vnd.apple.mpegurl');
+
+            return res.status(200).send(rawRes.data);
         } catch (e: any) {
-            console.error(`[Proxy Raw] Error: ${e.message}`);
-            res.setHeader('Content-Type', 'text/plain');
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.status(500).send("Audio Proxy Error");
-            return;
+            console.log(`[Proxy Raw] Failed: ${e.message}`);
+            return res.status(500).send("Audio Stream Error");
         }
     }
 
-    if (!targetUrl) return res.status(400).send("Missing URL");
+    // 1. Root Trap: Handle relative stream requests
+    if (!targetUrl) {
+        const fullPath = req.originalUrl;
+        if (fullPath.includes('/stream/')) {
+            const streamPart = fullPath.substring(fullPath.indexOf('/stream/') + 8);
+            const [pathSegment, query] = streamPart.split('?');
+            try {
+                // Keep stream token as-is; do not auto base64-decode arbitrary tokens.
+                let path = pathSegment;
 
-    try {
-        const urlObj = new URL(targetUrl);
-        const targetHost = urlObj.hostname;
-        const isM3U8 = targetUrl.includes(".m3u8");
-        const isSegment = targetUrl.includes(".ts") || targetUrl.includes(".m4s") || targetUrl.includes(".mp4");
-        const proxyRef = req.query.proxy_ref as string | undefined;
-
-        // Cleanup stale host block cache
-        const now = Date.now();
-        if (hostNeedsTor.has(targetHost)) {
-            const entry = hostNeedsTor.get(targetHost)!;
-            if (now - entry.timestamp > HOST_BLOCK_TTL) {
-                hostNeedsTor.delete(targetHost);
+                const playerUrl = await getPlayerUrl();
+                const base = playerUrl.replace(/\/$/, '');
+                targetUrl = path.startsWith('http') ? path : `${base}/stream/${path}`;
+                if (query) targetUrl += `?${query}`;
+            } catch (e) {
+                const playerUrl = await getPlayerUrl();
+                targetUrl = `${playerUrl.replace(/\/$/, '')}${fullPath}`;
             }
         }
+    }
 
-        // Cache mechanism for manifest files (HLS speedup)
+    let isSegment = false;
+
+    if (!targetUrl) return res.status(400).send("Proxy Error: No URL");
+
+    try {
+        // 1. Extract the Referer Hint (passed from getStream or recursive HLS)
+        const proxyRef = req.query.proxy_ref as string;
+
+        // 2. Identify file types and generate smart headers
+        const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt');
+        isSegment = targetUrl.includes('.ts') || targetUrl.includes('.mp4');
+        const manifestCacheKey = `${targetUrl}|${String(req.query.proxy_ref || "")}`;
+
+        // Fast-path cached rewritten manifest to reduce repeated upstream fetches.
         if (isM3U8) {
-            const cached = manifestResponseCache.get(targetUrl);
-            if (cached && cached.expiresAt > now) {
+            const cachedManifest = manifestResponseCache.get(manifestCacheKey);
+            if (cachedManifest && cachedManifest.expiresAt > Date.now()) {
+                res.setHeader("Access-Control-Allow-Origin", "*");
+                res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
+                res.setHeader("Access-Control-Allow-Headers", "*");
                 res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-                res.setHeader("X-Proxy-Cache", "HIT");
-                res.setHeader("Cache-Control", "public, max-age=15");
-                return res.send(cached.body);
+                res.setHeader("Cache-Control", "public, max-age=6");
+                return res.send(cachedManifest.body);
             }
         }
 
         const getProxyHeaders = (url: string, refererOverride?: string) => {
             const uri = new URL(url);
-            const referer = refererOverride || proxyRef || `${uri.origin}/`;
-            const cookie = getJarCookie(proxyRef);
+            // Use the hint from the query param if available - MOST RELIABLE
+            // This bypasses the need for the frontend to set tricky headers
+            let referer = refererOverride || proxyRef || "https://allmovieland.link/";
+
+            if (!refererOverride && !proxyRef) {
+                // Dynamic Referer Intelligence (Fallback only)
+                if (url.includes('slime') || url.includes('vekna')) {
+                    referer = `https://${url.includes('slime') ? 'vekna402las.com' : uri.host}/`;
+                } else if (url.includes('vidsrc')) {
+                    referer = "https://vidsrc.me/";
+                } else if (url.includes('vidlink')) {
+                    referer = "https://vidlink.pro/";
+                } else if (url.includes('superembed')) {
+                    referer = "https://superembed.stream/";
+                } else {
+                    referer = `https://${uri.host}/`;
+                }
+            } else {
+                // Trust explicit upstream hint from getStream/manifest rewriting.
+                try {
+                    const proxyRefUrl = new URL(proxyRef);
+                    // For cross-host segment fetches, prefer segment host referer.
+                    // Some CDNs reject fragments when referer host doesn't match.
+                    if (isSegment && proxyRefUrl.hostname !== uri.hostname) {
+                        referer = `https://${uri.host}/`;
+                    } else {
+                        referer = proxyRefUrl.href;
+                    }
+                } catch (e) {
+                    referer = `https://${uri.host}/`;
+                }
+            }
+
+            let origin = `https://${uri.host}`;
+            try {
+                origin = new URL(referer).origin;
+            } catch {
+                if (!referer.endsWith('/')) referer += '/';
+                origin = referer.replace(/\/$/, '');
+            }
+
+            const jarCookie = getJarCookie(proxyRef);
 
             return {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
                 "Referer": referer,
-                "Origin": new URL(referer).origin,
+                "Origin": origin,
                 "Accept": "*/*",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": isSegment ? "video" : "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
+                "DNT": "1",
+                "Pragma": "no-cache",
                 "Cache-Control": "no-cache",
-                ...(cookie ? { "Cookie": cookie } : {})
+                "Host": uri.host,
+                ...(jarCookie ? { "Cookie": jarCookie } : {})
             };
         };
 
         const tryFetch = async (useTor: boolean, refererOverride?: string) => {
-            const manifestTimeoutMs = useTor ? 12000 : 4000; // Even tighter for mobile startup
-            const segmentTimeoutMs = useTor ? 25000 : 12000;
-
-            const uri = new URL(targetUrl);
-            const isHttps = uri.protocol === 'https:';
-
+            const manifestTimeoutMs = useTor ? 15000 : 5000;
+            const segmentTimeoutMs = useTor ? 32000 : 12000;
             return await axios.get(targetUrl, {
-                headers: {
-                    ...getProxyHeaders(targetUrl, refererOverride),
-                    "Accept-Encoding": "gzip, deflate, br"
-                },
-                httpAgent: useTor ? torAgent : (isHttps ? undefined : keepAliveHttpAgent),
-                httpsAgent: useTor ? torAgent : (isHttps ? keepAliveHttpsAgent : undefined),
+                headers: getProxyHeaders(targetUrl, refererOverride),
+                httpAgent: useTor ? torAgent : undefined,
+                httpsAgent: useTor ? torAgent : undefined,
                 responseType: isM3U8 ? 'text' : 'stream',
                 timeout: isSegment ? segmentTimeoutMs : manifestTimeoutMs,
-                maxRedirects: 3,
-                validateStatus: (status) => status < 400,
-                decompress: true
+                maxRedirects: 5,
+                validateStatus: (status) => status < 400 // Only count 2xx/3xx as success
             });
         };
 
-        let response: any;
-        const needsTorCached = hostNeedsTor.has(targetHost);
-
+        let response;
         try {
+            // Priority for segments: Try Direct FIRST for speed, then Tor Fallback
+            // But if we detect a 403 (Block), we fail-fast to Tor to save time
             const preferTor = shouldPreferTor(targetUrl);
-            if (preferTor || needsTorCached) {
+            if (isSegment) {
                 try {
-                    response = await tryFetch(true);
-                } catch (e: any) {
-                    if (!needsTorCached) {
+                    if (preferTor) {
+                        // Anti-bot segment hosts are often unusable on direct lane.
+                        response = await tryFetch(true);
+                    } else {
+                        // Keep direct-first for regular hosts.
                         response = await tryFetch(false);
-                    } else throw e;
+                    }
+                } catch (e: any) {
+                    // For non-preferred hosts, fallback to Tor on block/failure.
+                    if (!preferTor && (e.message.includes('403') || e.message.includes('401'))) {
+                        console.log(`[Proxy Adaptive] Direct blocked (${e.message}). Switching to Tor lane...`);
+                    }
+                    try {
+                        response = await tryFetch(true);
+                    } catch (torErr: any) {
+                        // Retry with alternate referers for strict CDN anti-hotlinking.
+                        const fallbackReferers = Array.from(new Set([
+                            proxyRef || "",
+                            targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1),
+                            `https://${new URL(targetUrl).host}/`
+                        ].filter(Boolean)));
+
+                        let lastErr: any = torErr;
+                        for (const ref of fallbackReferers) {
+                            try {
+                                response = await tryFetch(true, ref);
+                                lastErr = null;
+                                break;
+                            } catch (retryErr: any) {
+                                lastErr = retryErr;
+                            }
+                        }
+
+                        if (lastErr) {
+                            // Segment-specific rescue: refresh parent manifest and retry the same segment path.
+                            try {
+                                if (proxyRef) {
+                                    const segmentName = (() => {
+                                        try {
+                                            const p = new URL(targetUrl).pathname;
+                                            return p.substring(p.lastIndexOf('/') + 1);
+                                        } catch {
+                                            return "";
+                                        }
+                                    })();
+
+                                    if (segmentName) {
+                                        let manifestRes;
+                                        try {
+                                            manifestRes = await axios.get(proxyRef, {
+                                                headers: getProxyHeaders(proxyRef, proxyRef),
+                                                timeout: 12000
+                                            });
+                                        } catch {
+                                            manifestRes = await axios.get(proxyRef, {
+                                                headers: getProxyHeaders(proxyRef, proxyRef),
+                                                httpAgent: torAgent,
+                                                httpsAgent: torAgent,
+                                                timeout: 15000
+                                            });
+                                        }
+
+                                        const manifestText = typeof manifestRes.data === "string"
+                                            ? manifestRes.data
+                                            : Buffer.from(manifestRes.data || "").toString("utf-8");
+
+                                        const base = proxyRef.substring(0, proxyRef.lastIndexOf('/') + 1);
+                                        const manifestLines = manifestText
+                                            .split('\n')
+                                            .map((l: string) => l.trim())
+                                            .filter((l: string) => l && !l.startsWith('#'));
+
+                                        const exactLine = manifestLines.find((l: string) => l.includes(segmentName));
+                                        const latestLine = [...manifestLines].reverse().find((l: string) =>
+                                            l.includes('.ts') || l.includes('.m4s') || l.includes('segment')
+                                        );
+                                        const chosenLine = exactLine || latestLine;
+
+                                        if (chosenLine) {
+                                            targetUrl = chosenLine.startsWith('http')
+                                                ? chosenLine
+                                                : new URL(chosenLine, base).href;
+                                            response = await tryFetch(true, proxyRef);
+                                        } else {
+                                            throw lastErr;
+                                        }
+                                    } else {
+                                        throw lastErr;
+                                    }
+                                } else {
+                                    throw lastErr;
+                                }
+                            } catch {
+                                throw lastErr;
+                            }
+                        }
+                    }
                 }
             } else {
-                try {
-                    response = await tryFetch(false);
-                } catch (e: any) {
-                    const isBlock = e.response?.status === 403 || e.response?.status === 401;
-                    if (isBlock || e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
-                        hostNeedsTor.set(targetHost, { timestamp: Date.now() });
+                // For known anti-bot hosts, Tor-first is faster and avoids manifest timeout loops.
+                if (preferTor) {
+                    try {
                         response = await tryFetch(true);
-                    } else throw e;
+                    } catch (e) {
+                        console.log(`[Proxy Fallback] Tor failed for manifest. Trying direct...`);
+                        response = await tryFetch(false);
+                    }
+                    // eslint-disable-next-line no-lonely-if
+                } else {
+                    // Manifests also try direct first for faster startup, then fallback to Tor.
+                    try {
+                        response = await tryFetch(false);
+                    } catch (e) {
+                        console.log(`[Proxy Fallback] Direct failed for manifest. Trying Tor...`);
+                        response = await tryFetch(true);
+                    }
                 }
             }
         } catch (finalErr: any) {
-            // Final failover attempt: refresh parent manifest domain as last resort
-            if (proxyRef && !targetUrl.includes(new URL(proxyRef).hostname)) {
-                try {
-                    response = await tryFetch(true, `${new URL(targetUrl).origin}/`);
-                } catch {
-                    throw finalErr;
-                }
-            } else throw finalErr;
+            throw finalErr;
         }
 
-        const contentType = response.headers["content-type"];
+        if (!response) {
+            throw new Error("Proxy fetch failed: empty upstream response");
+        }
 
-        // Set mandatory CORS and security headers
+        // Set permissive CORS
         res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
         res.setHeader("Access-Control-Allow-Headers", "*");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type, Date");
+
+        let contentType = response.headers["content-type"];
 
         // 3. Recursive HLS Rewriting (Manifests)
         if (isM3U8 || (contentType && (contentType.includes('mpegurl') || contentType.includes('application/x-mpegURL')))) {
+            console.log(`[Proxy Manifest] Rewriting: ${targetUrl.substring(0, 60)}...`);
+
             let content = "";
             if (typeof response.data === 'string') {
                 content = response.data;
             } else if (Buffer.isBuffer(response.data)) {
                 content = response.data.toString('utf-8');
-            }
-
-            // Capture Cookies from manifest for subsequent segment requests
-            const setCookie = response.headers["set-cookie"];
-            if (setCookie && proxyRef) {
-                manifestCookieJar.set(proxyRef, {
-                    cookie: extractCookieHeader(setCookie),
-                    timestamp: Date.now()
-                });
-            }
-
-            // Rewrite relative and absolute URLs in manifest to point back through this proxy
-            const lines = content.split("\n");
-            const rewrittenLines = lines.map((line: string) => {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith("#")) {
-                    // Specific fix: handle #EXT-X-KEY and similar metadata URLs
-                    if (trimmed.startsWith("#EXT-X-KEY") && trimmed.includes('URI="')) {
-                        return trimmed.replace(/URI="([^"]+)"/, (match: string, uri: string) => {
-                            const abs = uri.startsWith("http") ? uri : new URL(uri, targetUrl).href;
-                            return `URI="${proxyBase}${encodeURIComponent(abs)}${proxyRef ? `&proxy_ref=${encodeURIComponent(proxyRef)}` : ""}"`;
-                        });
-                    }
-                    return line;
+            } else if (typeof response.data === 'object') {
+                try {
+                    content = JSON.stringify(response.data);
+                } catch (e) {
+                    content = ""; // Fallback for circular/stream objects
                 }
-                const absolutePath = trimmed.startsWith("http") ? trimmed : new URL(trimmed, targetUrl).href;
-                return `${proxyBase}${encodeURIComponent(absolutePath)}${proxyRef ? `&proxy_ref=${encodeURIComponent(proxyRef)}` : ""}`;
-            });
+            }
 
-            const finalBody = rewrittenLines.join("\n");
-            manifestResponseCache.set(targetUrl, {
-                body: finalBody,
-                expiresAt: Date.now() + MANIFEST_CACHE_TTL_MS
-            });
+            if (!content.includes('#EXTM3U') && !targetUrl.includes('.txt')) {
+                return res.send(content);
+            }
 
             res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-            res.setHeader("Cache-Control", "public, max-age=15");
-            return res.send(finalBody);
+            res.setHeader("Cache-Control", "public, max-age=6");
+            const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+            const setCookieHeader = response.headers["set-cookie"] as string[] | undefined;
+            const cookieHeader = extractCookieHeader(setCookieHeader);
+            if (cookieHeader) {
+                manifestCookieJar.set(targetUrl, { cookie: cookieHeader, timestamp: Date.now() });
+                try {
+                    manifestCookieJar.set(new URL(targetUrl).origin, { cookie: cookieHeader, timestamp: Date.now() });
+                } catch { }
+            }
+
+            // Sustain the referer through recursive quality tracks and segments
+            // Pass the current manifest URL as parent referer for next-level requests.
+            const refParam = `&proxy_ref=${encodeURIComponent(targetUrl)}`;
+
+            const rewrittenLines = content.split('\n').map(line => {
+                const trimmed = line.trim();
+                if (!trimmed) return line;
+
+                // 3a. Handle Quality/Audio Variant Manifests (URI="...")
+                if (trimmed.includes('URI="')) {
+                    return trimmed.replace(/URI="([^"]+)"/g, (match, relUrl) => {
+                        const absUrl = relUrl.startsWith('http') ? relUrl : new URL(relUrl, baseUrl).href;
+                        return `URI="${proxyBase}${encodeURIComponent(absUrl)}${refParam}"`;
+                    });
+                }
+
+                // 3b. Handle Fragmented Video Segments (.ts) or Sub-Manifests
+                // CRITICAL: Filter out garbage lines like "7" or non-file lines
+                if (!trimmed.startsWith('#') && (trimmed.includes('/') || trimmed.includes('.ts') || trimmed.includes('.m3u8') || trimmed.length > 5)) {
+                    const absUrl = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
+                    return `${proxyBase}${encodeURIComponent(absUrl)}${refParam}`;
+                }
+
+                return line;
+            });
+
+            const rewrittenManifest = rewrittenLines.join('\n');
+            manifestResponseCache.set(manifestCacheKey, {
+                body: rewrittenManifest,
+                expiresAt: Date.now() + MANIFEST_CACHE_TTL_MS
+            });
+            return res.send(rewrittenManifest);
         }
 
         // 4. Handle Binary/Segment Data (Piping)
         res.setHeader("Content-Type", contentType || (isSegment ? "video/mp2t" : "application/octet-stream"));
         if (isSegment) {
-            res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+            res.setHeader("Cache-Control", "public, max-age=60");
         }
 
+        // Ensure accurate content length if provided
         if (response.headers["content-length"]) {
             res.setHeader("Content-Length", response.headers["content-length"]);
         }
 
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
         response.data.pipe(res);
 
-    } catch (error: any) {
+        } catch (error: any) {
+            // Only log fatal errors for manifests (crucial for debugging)
+            // Silence segment errors as they are retried or handled by the player
+            if (!isSegment) {
+                console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
+            } else {
+                console.log(`[Proxy Segment Error] ${error.message} for ${targetUrl}`);
+            }
+
         if (!res.headersSent) {
-            res.status(500).send("Proxy Error");
+            res.status(500).send("Proxy connectivity issues. Please try refreshing.");
         }
     }
 }

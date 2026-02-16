@@ -64,7 +64,7 @@ export default async function mediaInfo(req: Request, res: Response) {
     }
 
     console.log(`Response data:`, data);
-
+    
     // Cache success briefly: upstream file/key tokens are short-lived and become invalid.
     if (data.success) {
       cache.set(cacheKey, data, MEDIAINFO_SUCCESS_CACHE_TTL_MS);
@@ -90,20 +90,20 @@ export default async function mediaInfo(req: Request, res: Response) {
       // Cache failed results for shorter duration to allow retries
       cache.set(cacheKey, data, MEDIAINFO_FAILURE_CACHE_TTL_MS);
     }
-
+    
     res.json(data);
   } catch (err) {
     console.log("error in mediaInfo: ", err);
-
+    
     // Send error response
     const errorResponse = {
       success: false,
       message: "Internal server error: " + (err instanceof Error ? err.message : String(err)),
     };
-
+    
     // Cache the error response briefly to prevent retry storms.
     cache.set(cacheKey, errorResponse, MEDIAINFO_FAILURE_CACHE_TTL_MS);
-
+    
     res.status(500).json(errorResponse);
   }
 }
