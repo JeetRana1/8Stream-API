@@ -235,22 +235,37 @@ export default async function proxy(req: Request, res: Response) {
         // 2. minimum latency (instant playback)
         // 3. automatic fallback if one lane fails
 
-        try {
-            const directP = executeFetch(false).then(r => ({ r, lane: 'direct' }));
-            const torP = executeFetch(true).then(r => ({ r, lane: 'tor' }));
-
-            // Promise.any waits for the first FULFILLED promise.
-            // If Direct fails fast (403/404), it waits for Tor.
-            // If both succeed, the faster one wins.
-            const winner = await Promise.any([directP, torP]);
-            response = winner.r;
-
-            // Optional: Log if we used Tor when not preferred, or vice versa (for debugging)
-            // if (winner.lane === 'tor' && !preferTor) console.log(`[Proxy] Tor won for non-preferred ${targetUrl.substring(0,30)}`);
-
-        } catch (e: any) {
-            // Both failed
-            throw new Error("Unreachable via Direct or Tor (All lanes failed)");
+        if (isM3U8) {
+            // Manifest: Race Direct vs Tor (Safe because text files are small)
+            // This ensures instant audio switching and IP alignment
+            try {
+                const directP = executeFetch(false).then(r => ({ r, lane: 'direct' }));
+                const torP = executeFetch(true).then(r => ({ r, lane: 'tor' }));
+                const winner = await Promise.any([directP, torP]);
+                response = winner.r;
+            } catch (e: any) {
+                throw new Error("Manifest unreachable via Direct or Tor");
+            }
+        } else {
+            // Segment: Sequential (Direct -> Tor) to prevent OOM
+            // Do NOT race massive video segments in memory
+            try {
+                response = await axios.get(targetUrl, {
+                    headers: getProxyHeaders(targetUrl),
+                    timeout: 4000, // Fast fail for direct
+                    responseType: 'arraybuffer',
+                    maxContentLength: 15 * 1024 * 1024, // Safety limit 15MB
+                    validateStatus: (s) => s < 400
+                });
+            } catch (e: any) {
+                // If Direct fails, try Tor
+                // console.log(`[Proxy Segment] Direct failed. Retrying Tor...`);
+                try {
+                    response = await executeFetch(true);
+                } catch (torErr: any) {
+                    throw new Error("Segment unreachable via Direct or Tor");
+                }
+            }
         }
 
         if (!response) throw new Error("Fetch yielded no response");
