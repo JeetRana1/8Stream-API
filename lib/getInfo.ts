@@ -47,7 +47,6 @@ export default async function getInfo(id: string) {
 
         for (const referer of perDomainReferers) {
           tasks.push((async () => {
-            // If another task already won, abort immediately
             if (resolvedData) return;
 
             try {
@@ -63,7 +62,7 @@ export default async function getInfo(id: string) {
 
               const fetchOptions = {
                 headers,
-                timeout: useTor ? 18000 : 6000,
+                timeout: useTor ? 20000 : 8000,
                 httpAgent: useTor ? torAgent : undefined,
                 httpsAgent: useTor ? torAgent : undefined,
                 validateStatus: (s: number) => s === 200
@@ -72,68 +71,75 @@ export default async function getInfo(id: string) {
               try {
                 response = await axios.get(targetUrl, fetchOptions);
               } catch (err: any) {
-                // Intelligent Tor Failover
-                if (!useTor && (err.code === 'ECONNABORTED' || err.response?.status === 403 || err.response?.status === 429)) {
-                  hostNeedsTor.set(new URL(targetUrl).hostname, { timestamp: Date.now() });
-                  response = await axios.get(targetUrl, { ...fetchOptions, httpAgent: torAgent, httpsAgent: torAgent, timeout: 20000 });
-                } else return; // Failure, just exit this task
+                if (!useTor && (err.code === 'ECONNABORTED' || err.response?.status === 403 || err.response?.status === 404)) {
+                  // Some mirrors might return 404 for certain IDs, we ignore and try others
+                  return;
+                } else return;
               }
 
-              if (!response || response.status !== 200) return;
+              if (!response || !response.data) return;
 
               const html = String(response.data);
-              if (!html.includes("file")) return;
+              // Broader check for metadata: file, sources, playlist, etc.
+              if (!html.includes("file") && !html.includes("sources") && !html.includes("playlist")) return;
 
               const $ = cheerio.load(html);
               const scripts = $("script").map((i, el) => $(el).html()).get();
 
               for (const script of scripts) {
                 if (resolvedData) return;
-                if (!script || !script.includes("file")) continue;
+                if (!script) continue;
 
-                // Extract file and key using multi-format regex
-                const fileMatch = script.match(/["']?file["']?\s*:\s*["']([^"']+)["']/);
-                const keyMatch = script.match(/["']?key["']?\s*:\s*["']([^"']+)["']/);
+                // 1. Try to find 'file' or 'sources' or 'playlist'
+                const fileMatch = script.match(/["']?(file|sources|playlist)["']?\s*[:=]\s*["']([^"']+)["']/);
+                const keyMatch = script.match(/["']?key["']?\s*[:=]\s*["']([^"']+)["']/);
 
-                if (fileMatch && fileMatch[1]) {
+                if (fileMatch && fileMatch[2]) {
                   foundPotentialMetadata = true;
-                  const file = fileMatch[1];
-                  const key = keyMatch ? keyMatch[1] : "";
-                  const playlistUrl = file.startsWith("http") ? file : `${domain}${file}`;
+                  let file = fileMatch[2];
+                  const key = keyMatch ? keyMatch[2] : "";
+
+                  // Handle potential Base64 encoding
+                  if (!file.startsWith('http') && !file.startsWith('/') && !file.includes('.') && /^[A-Za-z0-9+/=]+$/.test(file)) {
+                    try {
+                      const decoded = Buffer.from(file, 'base64').toString('utf-8');
+                      if (decoded.startsWith('http') || decoded.startsWith('/')) file = decoded;
+                    } catch { }
+                  }
+
+                  let playlistUrl = file.startsWith("http") ? file : (file.startsWith('//') ? `https:${file}` : `${domain}${file.startsWith('/') ? '' : '/'}${file}`);
 
                   try {
-                    // Attempt to validate the playlist (Race inside the race)
+                    console.log(`[getInfo] Validating playlist: ${playlistUrl} for ID: ${id}`);
                     const playlistRes = await axios.get(playlistUrl, {
-                      headers: {
-                        "User-Agent": headers["User-Agent"],
-                        "Referer": targetUrl,
-                        "X-Csrf-Token": key || "0"
-                      },
-                      timeout: 8000
+                      headers: { "User-Agent": headers["User-Agent"], "Referer": targetUrl, "X-Csrf-Token": key || "0" },
+                      timeout: 10000
                     });
 
-                    let playlist = Array.isArray(playlistRes.data) ? playlistRes.data : (playlistRes.data.list || []);
-                    playlist = playlist.filter((item: any) => item && (item.file || item.folder));
+                    let playlist: any[] = [];
+                    if (Array.isArray(playlistRes.data)) {
+                      playlist = playlistRes.data;
+                    } else if (playlistRes.data && typeof playlistRes.data === 'object' && playlistRes.data.list) {
+                      playlist = playlistRes.data.list;
+                    } else if (typeof playlistRes.data === 'string' && (playlistRes.data.includes('#EXTM3U') || playlistRes.data.includes('playlist'))) {
+                      // It's a direct HLS manifest! Convert to internal format
+                      playlist = [{ file: playlistUrl, label: "Auto", type: "hls" }];
+                    }
+
+                    playlist = playlist.filter((item: any) => item && (item.file || item.folder || item.src));
 
                     if (playlist.length > 0 && !resolvedData) {
-                      console.log(`[getInfo] WINNER: ${targetUrl} (Referer: ${referer})`);
+                      console.log(`[getInfo] SUCCESS: Found ${playlist.length} tracks at ${targetUrl}`);
                       resolvedData = { success: true, data: { playlist, key } };
                       return;
                     }
-                  } catch (playlistErr) {
-                    // Silent failover to Tor for the playlist itself as a last resort
-                    try {
-                      const torPlaylistRes = await axios.get(playlistUrl, {
-                        headers: { "User-Agent": headers["User-Agent"], "Referer": targetUrl, "X-Csrf-Token": key },
-                        httpAgent: torAgent, httpsAgent: torAgent, timeout: 15000
-                      });
-                      let playlist = Array.isArray(torPlaylistRes.data) ? torPlaylistRes.data : (torPlaylistRes.data.list || []);
-                      playlist = playlist.filter((item: any) => item && (item.file || item.folder));
-                      if (playlist.length > 0 && !resolvedData) {
-                        resolvedData = { success: true, data: { playlist, key } };
-                        return;
-                      }
-                    } catch { }
+                  } catch (e: any) {
+                    console.warn(`[getInfo] Failed to fetch playlist from ${playlistUrl}: ${e.message}`);
+                    // Last ditch effort: if it failed but we have a key and it looks like a direct link
+                    if (file.includes('.m3u8')) {
+                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream", type: "hls" }], key } };
+                      return;
+                    }
                   }
                 }
               }
@@ -143,20 +149,18 @@ export default async function getInfo(id: string) {
       }
     }
 
-    // 3. Orchestrate the race: Wait until either someone wins or all tasks finish
-    // We use a custom waiter because we want to stop as soon as resultData is set.
+    // 3. Orchestrate the race
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Resolution Timeout")), 30000));
 
     await Promise.race([
       Promise.all(tasks),
       timeoutPromise
-    ]).catch(() => {
-      console.warn(`[getInfo] Race timed out for ${id}`);
+    ]).catch((err) => {
+      console.warn(`[getInfo] Race completed with timeout or error for ${id}: ${err.message}`);
     });
 
     if (resolvedData) return resolvedData;
 
-    // If we found a file but no playlist, it's likely unreleased
     return {
       success: false,
       message: foundPotentialMetadata
