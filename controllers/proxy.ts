@@ -230,21 +230,13 @@ export default async function proxy(req: Request, res: Response) {
         };
 
         if (isM3U8) {
-            // Manifest Rule: Race Direct and Tor in parallel unless forced Tor
+            // Manifest: Try Direct first, then Tor
             if (!preferTor) {
                 try {
-                    // Wrap in objects to satisfy Promise.any's requirement for success
-                    const directP = executeFetch(false).then(r => ({ r }));
-                    const torP = executeFetch(true).then(r => ({ r }));
-                    const winner = await Promise.any([directP, torP]);
-                    response = winner.r;
-                } catch (e: any) {
-                    // If everything failed, try a last-ditch Tor fetch (in case AggregateError obscured success)
-                    try {
-                        response = await executeFetch(true);
-                    } catch {
-                        throw new Error("Manifest unreachable via all lanes");
-                    }
+                    response = await executeFetch(false);
+                } catch {
+                    console.log(`[Proxy Manifest] Direct failed, retrying via Tor for ${targetUrl}`);
+                    response = await executeFetch(true);
                 }
             } else {
                 try {
@@ -254,27 +246,24 @@ export default async function proxy(req: Request, res: Response) {
                 }
             }
         } else {
-            // Segment Rule: Direct-First with Fast Fallback to Tor
-            if (preferTor) {
+            // Segment: Try Direct first, then Tor
+            if (!preferTor) {
                 try {
-                    response = await executeFetch(true);
-                } catch {
-                    response = await executeFetch(false);
-                }
-            } else {
-                let directFailed = false;
-                try {
-                    // Try direct with a relatively short timeout for the "first" response
                     response = await axios.get(targetUrl, {
                         headers: getProxyHeaders(targetUrl),
-                        timeout: 5000, // Quick timeout for direct segment
+                        timeout: 5000,
                         responseType: 'arraybuffer',
                         validateStatus: (s) => s < 400
                     });
                 } catch (e: any) {
-                    directFailed = true;
                     console.log(`[Proxy Segment] Direct failed for ${targetUrl.substring(0, 40)}. Falling back to Tor...`);
                     response = await executeFetch(true);
+                }
+            } else {
+                try {
+                    response = await executeFetch(true);
+                } catch {
+                    response = await executeFetch(false);
                 }
             }
         }
