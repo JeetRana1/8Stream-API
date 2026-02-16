@@ -209,13 +209,13 @@ async function isCachedStreamStillValid(streamUrl: string, refererHint: string):
 export default async function getStream(req: Request, res: Response) {
   const { file, key } = req.body;
 
-  if (!file || !key) {
-    return res.status(400).json({ success: false, message: "Missing file or key" });
+  if (!file) {
+    return res.status(400).json({ success: false, message: "Missing file" });
   }
 
   try {
     let finalStreamUrl = "";
-    const normalizedKey = normalizeOpaqueValue(String(key));
+    const normalizedKey = key ? normalizeOpaqueValue(String(key)) : "";
     let token = normalizeOpaqueValue(String(file));
     let proxyRef = "";
     let refererHint = "";

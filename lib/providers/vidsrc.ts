@@ -14,7 +14,9 @@ export async function getVidSrcStream(id: string) {
         const domains = [
             'https://vidsrc.to',
             'https://vidsrc.me',
-            'https://vidsrc.net'
+            'https://vidsrc.net',
+            'https://vidsrc.xyz',
+            'https://vidsrc.icu'
         ];
 
         for (const domain of domains) {
@@ -25,14 +27,32 @@ export async function getVidSrcStream(id: string) {
 
                 console.log(`[VidSrc] Trying: ${embedUrl}`);
 
-                const response = await axios.get(embedUrl, {
-                    headers: {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Referer": domain,
-                    },
-                    timeout: 8000
-                });
+                // Helper to fetch with direct or tor fallback
+                const fetchWithFallback = async (url: string, referer: string) => {
+                    const headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                        "Referer": referer,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    };
+                    try {
+                        return await axios.get(url, { headers, timeout: 8000 });
+                    } catch (err: any) {
+                        const status = err.response?.status;
+                        if (status === 403 || status === 429 || !err.response) {
+                            console.log(`[VidSrc] Direct failed (${status || 'timeout'}), trying Tor for ${url}`);
+                            return await axios.get(url, {
+                                headers,
+                                httpAgent: torAgent,
+                                httpsAgent: torAgent,
+                                timeout: 15000
+                            });
+                        }
+                        throw err;
+                    }
+                };
 
+                const response = await fetchWithFallback(embedUrl, domain);
                 const $ = cheerio.load(response.data);
 
                 // VidSrc typically has iframe with data-src or src
@@ -51,14 +71,7 @@ export async function getVidSrcStream(id: string) {
 
                     // Now fetch the actual stream from the embed
                     try {
-                        const embedResponse = await axios.get(streamUrl, {
-                            headers: {
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                "Referer": embedUrl,
-                            },
-                            timeout: 10000
-                        });
-
+                        const embedResponse = await fetchWithFallback(streamUrl, embedUrl);
                         const embed$ = cheerio.load(embedResponse.data);
 
                         // Look for HLS manifest URL in the embed page
@@ -78,7 +91,7 @@ export async function getVidSrcStream(id: string) {
                                             file: m3u8Match[0],
                                             folder: []
                                         }],
-                                        key: "",
+                                        key: "vidsrc_direct",
                                         provider: "vidsrc"
                                     }
                                 };
@@ -86,17 +99,17 @@ export async function getVidSrcStream(id: string) {
 
                             // Look for source URLs in various formats
                             const sourceMatch = scriptContent.match(/["']?(?:source|file|src)["']?\s*:\s*["']([^"']+)["']/);
-                            if (sourceMatch && sourceMatch[1] && sourceMatch[1].includes('m3u8')) {
+                            if (sourceMatch && sourceMatch[1] && (sourceMatch[1].includes('m3u8') || sourceMatch[1].includes('.mp4'))) {
                                 console.log(`[VidSrc] Found source URL: ${sourceMatch[1]}`);
                                 return {
                                     success: true,
                                     data: {
                                         playlist: [{
                                             title: "VidSrc Stream",
-                                            file: sourceMatch[1],
+                                            file: sourceMatch[1].startsWith('//') ? `https:${sourceMatch[1]}` : sourceMatch[1],
                                             folder: []
                                         }],
-                                        key: "",
+                                        key: "vidsrc_direct",
                                         provider: "vidsrc"
                                     }
                                 };
@@ -104,32 +117,31 @@ export async function getVidSrcStream(id: string) {
                         }
 
                         // If we can't extract the HLS URL, return the embed URL itself
-                        // The proxy will handle it
-                        console.log(`[VidSrc] Could not extract HLS, returning embed URL`);
+                        // But only if it's not the same as the original embed URL to avoid loops
+                        console.log(`[VidSrc] Could not extract HLS, returning embed URL as fallback`);
                         return {
                             success: true,
                             data: {
                                 playlist: [{
-                                    title: "VidSrc Stream",
+                                    title: "VidSrc Stream (Fallback)",
                                     file: streamUrl,
                                     folder: []
                                 }],
-                                key: "",
+                                key: "vidsrc_embed",
                                 provider: "vidsrc"
                             }
                         };
                     } catch (embedError: any) {
                         console.log(`[VidSrc] Failed to fetch embed: ${embedError.message}`);
-                        // Return the embed URL anyway
                         return {
                             success: true,
                             data: {
                                 playlist: [{
-                                    title: "VidSrc Stream",
+                                    title: "VidSrc Stream (Embed)",
                                     file: streamUrl,
                                     folder: []
                                 }],
-                                key: "",
+                                key: "vidsrc_embed",
                                 provider: "vidsrc"
                             }
                         };
