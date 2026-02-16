@@ -10,7 +10,7 @@ const manifestResponseCache = new Map<string, { body: string; expiresAt: number 
 const MANIFEST_CACHE_TTL_MS = 10000;
 
 // Optimized Segment Cache (LRU-like)
-const SEGMENT_CACHE_LIMIT = 100; // Cache last 100 segments
+const SEGMENT_CACHE_LIMIT = 20; // Cache last 20 segments (approx 100MB max)
 const segmentCache = new Map<string, { data: Buffer; contentType: string; headers: any }>();
 const segmentCacheLastUsed: string[] = [];
 
@@ -62,6 +62,10 @@ export default async function proxy(req: Request, res: Response) {
     const forwardedProto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
     const protocol = forwardedProto || req.protocol || "https";
     const proxyBase = `${protocol}://${host}/api/v1/proxy?url=`;
+
+    // Always set CORS headers early
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "*");
 
     // 0. Safety Valve: Smart Passthrough for Fragile Audio Providers (via Tor)
     if (targetUrl && (targetUrl.includes('lizer123') || targetUrl.includes('getm3u8'))) {
@@ -325,17 +329,25 @@ export default async function proxy(req: Request, res: Response) {
         const dataBuffer = Buffer.from(response.data);
 
         // Save to cache
-        if (isSegment && dataBuffer.length < 5 * 1024 * 1024) {
-            if (segmentCache.size >= SEGMENT_CACHE_LIMIT) {
-                const oldest = segmentCacheLastUsed.shift();
-                if (oldest) segmentCache.delete(oldest);
+        // Save to cache (wrap in try-catch to avoid OOM)
+        if (isSegment && dataBuffer.length < 5 * 1024 * 1024) { // Only cache segments < 5MB
+            try {
+                if (segmentCache.size >= SEGMENT_CACHE_LIMIT) {
+                    const oldest = segmentCacheLastUsed.shift();
+                    if (oldest) segmentCache.delete(oldest);
+                }
+                segmentCache.set(targetUrl, {
+                    data: dataBuffer,
+                    contentType: contentType || "video/mp2t",
+                    headers: response.headers
+                });
+                segmentCacheLastUsed.push(targetUrl);
+            } catch (e) {
+                console.warn("[Proxy Cache] Failed to cache segment (OOM protection):", e);
+                // Clear cache on error to free memory
+                segmentCache.clear();
+                segmentCacheLastUsed.length = 0;
             }
-            segmentCache.set(targetUrl, {
-                data: dataBuffer,
-                contentType: contentType || "video/mp2t",
-                headers: response.headers
-            });
-            segmentCacheLastUsed.push(targetUrl);
         }
 
         res.setHeader("Content-Type", contentType || (isSegment ? "video/mp2t" : "application/octet-stream"));
@@ -351,6 +363,7 @@ export default async function proxy(req: Request, res: Response) {
     } catch (error: any) {
         console.error(`[Proxy Error] ${error.message} for ${targetUrl}`);
         if (!res.headersSent) {
+            res.setHeader("Access-Control-Allow-Origin", "*"); // Ensure CORS even on error
             res.status(500).send(`Streaming unreachable: ${error.message}`);
         }
     }
