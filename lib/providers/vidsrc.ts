@@ -9,14 +9,14 @@ export async function getVidSrcStream(id: string) {
         const cleanId = id.replace('tt', '');
         const isImdb = id.startsWith('tt');
 
-        // Extended domain list
+        // Prime domains for VidSrc
         const domains = [
             'https://vidsrc.to',
             'https://vidsrc.me',
+            'https://vidsrc.cc',
             'https://vidsrc.net',
-            'https://vidsrc.in',
-            'https://vidsrc.pm',
-            'https://vidsrc.xyz'
+            'https://vidsrc.xyz',
+            'https://vidsrc.pm'
         ];
 
         for (const domain of domains) {
@@ -32,13 +32,21 @@ export async function getVidSrcStream(id: string) {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
                         "Referer": referer,
                         "Accept": "*/*",
+                        "Cache-Control": "no-cache"
                     };
                     try {
-                        return await axios.get(url, { headers, timeout: 8000 });
+                        const res = await axios.get(url, { headers, timeout: 10000 });
+                        if (res.status === 404) throw new Error("404");
+                        return res;
                     } catch (err: any) {
                         const status = err.response?.status;
-                        if (status === 403 || status === 429 || !err.response) {
-                            console.log(`[VidSrc] Direct failed (${status || 'timeout'}), trying Tor for ${url}`);
+                        if (status === 403 || status === 429 || !err.response || err.message === '404') {
+                            if (err.message === '404' && !url.includes('rcp')) {
+                                // Don't Tor fallback 404s for main domains usually, but VidSrc is weird
+                                console.log(`[VidSrc] 404 on ${url}, skipping or trying mirror`);
+                                throw err;
+                            }
+                            console.log(`[VidSrc] Direct failed/blocked (${status || err.message}), trying Tor for ${url}`);
                             return await axios.get(url, {
                                 headers,
                                 httpAgent: torAgent,
@@ -53,93 +61,66 @@ export async function getVidSrcStream(id: string) {
                 const response = await fetchWithFallback(embedUrl, domain);
                 const $ = cheerio.load(response.data);
 
-                // Find the internal player URL (usually in an iframe)
-                const iframes = $('iframe').toArray();
-                let innerUrls: string[] = [];
+                // Collect all potential player/iframe URLs
+                const candidateUrls: string[] = [];
+                $('iframe').each((_, el) => {
+                    const src = $(el).attr('data-src') || $(el).attr('src');
+                    if (src) candidateUrls.push(src);
+                });
 
-                for (const iframe of iframes) {
-                    const src = $(iframe).attr('data-src') || $(iframe).attr('src');
-                    if (src) {
-                        let normalized = src;
-                        if (src.startsWith('//')) normalized = 'https:' + src;
-                        else if (!src.startsWith('http')) normalized = domain + (src.startsWith('/') ? src : '/' + src);
-                        innerUrls.push(normalized);
+                // Also look for window.location or similar in scripts
+                const scriptText = $('script').text();
+                const urlInScript = scriptText.match(/https?:\/\/[^\s"'<>]+/g) || [];
+                urlInScript.forEach(u => {
+                    if (u.includes('embed') || u.includes('player') || u.includes('rcp')) {
+                        candidateUrls.push(u);
                     }
-                }
+                });
 
-                // If no iframes, check for scripts that might set window.location or similar
-                if (innerUrls.length === 0) {
-                    const scripts = $('script').toArray();
-                    for (const s of scripts) {
-                        const content = $(s).html() || '';
-                        const match = content.match(/src\s*:\s*["']([^"']+)["']/);
-                        if (match && (match[1].includes('embed') || match[1].includes('player'))) {
-                            let normalized = match[1];
-                            if (normalized.startsWith('//')) normalized = 'https:' + normalized;
-                            innerUrls.push(normalized);
-                        }
-                    }
-                }
+                // Unique and normalized URLs
+                const uniqueUrls = Array.from(new Set(candidateUrls.map(u => {
+                    if (u.startsWith('//')) return 'https:' + u;
+                    if (!u.startsWith('http')) return domain + (u.startsWith('/') ? u : '/' + u);
+                    return u;
+                })));
 
-                for (let innerUrl of innerUrls) {
-                    console.log(`[VidSrc] Analyzing inner URL: ${innerUrl}`);
-
+                for (const innerUrl of uniqueUrls) {
+                    console.log(`[VidSrc] Analyzing candidate: ${innerUrl}`);
                     try {
-                        const innerResponse = await fetchWithFallback(innerUrl, embedUrl);
-                        const innerDoc = innerResponse.data;
-                        const inner$ = cheerio.load(innerDoc);
+                        const innerRes = await fetchWithFallback(innerUrl, embedUrl);
+                        const body = typeof innerRes.data === 'string' ? innerRes.data : JSON.stringify(innerRes.data);
 
-                        // Look for the "real" stream URL in THIS page
+                        // DEEP SCAN STRATEGY
 
-                        // 1. Check for standard m3u8 regex
-                        const manifestRegex = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"']*/gi;
-                        const allMatches = innerDoc.match(manifestRegex) || [];
-
-                        for (const mUrl of allMatches) {
-                            if (mUrl.includes('playlist.m3u8') || mUrl.includes('master.m3u8') || mUrl.includes('/index.m3u8')) {
-                                console.log(`[VidSrc] Found Direct HLS: ${mUrl}`);
-                                return {
-                                    success: true,
-                                    data: {
-                                        playlist: [{ title: "VidSrc HD", file: mUrl, folder: [] }],
-                                        key: "vidsrc_direct",
-                                        provider: "vidsrc"
-                                    }
-                                };
-                            }
-                        }
-
-                        // 2. Look for JSON structures (often used by JWPlayer or Clappr)
-                        const jsonRegex = /\{[^{}]*?"file"\s*:\s*["']([^"']+\.m3u8[^"']*)["'][^{}]*?\}/gi;
-                        let jsonMatch;
-                        while ((jsonMatch = jsonRegex.exec(innerDoc)) !== null) {
-                            let fUrl = jsonMatch[1];
-                            if (fUrl.startsWith('//')) fUrl = 'https:' + fUrl;
-                            console.log(`[VidSrc] Found HLS in JSON: ${fUrl}`);
+                        // 1. Look for direct .m3u8 URLs (even in complex strings)
+                        const m3u8Regex = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*\??[^\s"'<>]*/gi;
+                        const m3u8Matches = body.match(m3u8Regex) || [];
+                        for (const m of m3u8Matches) {
+                            console.log(`[VidSrc] FOUND DIRECT HLS: ${m}`);
                             return {
                                 success: true,
                                 data: {
-                                    playlist: [{ title: "VidSrc JSON", file: fUrl, folder: [] }],
+                                    playlist: [{ title: "VidSrc High", file: m, folder: [] }],
                                     key: "vidsrc_direct",
                                     provider: "vidsrc"
                                 }
                             };
                         }
 
-                        // 3. Look for the "RCP" or encoded data
-                        // Often there's an ajax call like /ajax/embed/source?id=...
-                        const ajaxMatch = innerDoc.match(/\/ajax\/embed\/[^"']+/);
-                        if (ajaxMatch) {
-                            const ajaxUrl = innerUrl.split('/').slice(0, 3).join('/') + ajaxMatch[0];
-                            console.log(`[VidSrc] Found potential AJAX endpoint: ${ajaxUrl}`);
+                        // 2. Look for Base64 encoded URLs (very common in cloudnestra/vidsrc)
+                        // This regex looks for base64 blocks that might contain URLs
+                        const b64Pattern = /["']([A-Za-z0-9+/=]{100,})["']/g;
+                        let b64Match;
+                        while ((b64Match = b64Pattern.exec(body)) !== null) {
                             try {
-                                const ajaxRes = await fetchWithFallback(ajaxUrl, innerUrl);
-                                if (ajaxRes.data && ajaxRes.data.url) {
-                                    console.log(`[VidSrc] AJAX success: ${ajaxRes.data.url}`);
+                                const decoded = Buffer.from(b64Match[1], 'base64').toString('utf8');
+                                const subMatches = decoded.match(m3u8Regex) || decoded.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/gi) || [];
+                                for (const sm of subMatches) {
+                                    console.log(`[VidSrc] FOUND B64 DECODED URL: ${sm}`);
                                     return {
                                         success: true,
                                         data: {
-                                            playlist: [{ title: "VidSrc AJAX", file: ajaxRes.data.url, folder: [] }],
+                                            playlist: [{ title: "VidSrc B64", file: sm, folder: [] }],
                                             key: "vidsrc_direct",
                                             provider: "vidsrc"
                                         }
@@ -148,55 +129,58 @@ export async function getVidSrcStream(id: string) {
                             } catch { }
                         }
 
-                        // 4. Base64 fallback (more robust)
-                        const b64Regex = /["']([A-Za-z0-9+/=]{60,})["']/g;
-                        let b64;
-                        while ((b64 = b64Regex.exec(innerDoc)) !== null) {
-                            try {
-                                const decoded = Buffer.from(b64[1], 'base64').toString();
-                                if (decoded.includes('.m3u8')) {
-                                    const uMatch = decoded.match(/https?:\/\/[^\s"']+/);
-                                    if (uMatch) {
-                                        console.log(`[VidSrc] Decoded B64 HLS: ${uMatch[0]}`);
-                                        return {
-                                            success: true,
-                                            data: {
-                                                playlist: [{ title: "VidSrc B64", file: uMatch[0], folder: [] }],
-                                                key: "vidsrc_direct",
-                                                provider: "vidsrc"
-                                            }
-                                        };
+                        // 3. Look for "file" or "sources" in JSON-like structures
+                        const jsonSearch = /file\s*:\s*["']([^"']+)["']/gi;
+                        let jMatch;
+                        while ((jMatch = jsonSearch.exec(body)) !== null) {
+                            let fUrl = jMatch[1];
+                            if (fUrl.includes('.m3u8') || fUrl.includes('.mp4')) {
+                                if (fUrl.startsWith('//')) fUrl = 'https:' + fUrl;
+                                console.log(`[VidSrc] FOUND JSON FILE: ${fUrl}`);
+                                return {
+                                    success: true,
+                                    data: {
+                                        playlist: [{ title: "VidSrc JSON", file: fUrl, folder: [] }],
+                                        key: "vidsrc_direct",
+                                        provider: "vidsrc"
                                     }
+                                };
+                            }
+                        }
+
+                        // 4. Look for ajax endpoints that might return the source
+                        const ajaxSearch = /\/ajax\/(?:embed|v2)\/source\/[A-Za-z0-9]+/i;
+                        const aj = body.match(ajaxSearch);
+                        if (aj) {
+                            const baseUrl = innerUrl.split('/').slice(0, 3).join('/');
+                            const ajaxUrl = baseUrl + aj[0];
+                            console.log(`[VidSrc] Requesting AJAX source: ${ajaxUrl}`);
+                            try {
+                                const ajRes = await fetchWithFallback(ajaxUrl, innerUrl);
+                                if (ajRes.data && ajRes.data.url) {
+                                    return {
+                                        success: true,
+                                        data: {
+                                            playlist: [{ title: "VidSrc AJAX", file: ajRes.data.url, folder: [] }],
+                                            key: "vidsrc_direct",
+                                            provider: "vidsrc"
+                                        }
+                                    };
                                 }
                             } catch { }
                         }
-                    } catch (e: any) {
-                        console.log(`[VidSrc] Error analyzing inner URL: ${e.message}`);
-                    }
-                }
 
-                // Final check: Maybe the stream URL is right in the main page?
-                const mainMatches = (response.data as string).match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"']*/gi) || [];
-                for (const mUrl of mainMatches) {
-                    if (mUrl.includes('.m3u8')) {
-                        console.log(`[VidSrc] Found HLS on main page: ${mUrl}`);
-                        return {
-                            success: true,
-                            data: {
-                                playlist: [{ title: "VidSrc Main", file: mUrl, folder: [] }],
-                                key: "vidsrc_direct",
-                                provider: "vidsrc"
-                            }
-                        };
+                    } catch (e: any) {
+                        console.log(`[VidSrc] Failed analyzing ${innerUrl}: ${e.message}`);
                     }
                 }
 
             } catch (e: any) {
-                console.log(`[VidSrc] Error on ${domain}: ${e.message}`);
+                console.log(`[VidSrc] Failed domain ${domain}: ${e.message}`);
             }
         }
 
-        return { success: false, message: "VidSrc: No stream found after deep scan" };
+        return { success: false, message: "VidSrc: No streams found after exhaustive scan" };
     } catch (error: any) {
         console.error(`[VidSrc] Critical Error:`, error.message);
         return { success: false, message: `VidSrc Error: ${error.message}` };
