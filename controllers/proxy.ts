@@ -248,23 +248,39 @@ export default async function proxy(req: Request, res: Response) {
                 throw new Error("Manifest unreachable via Direct or Tor");
             }
         } else {
-            // Segment: Sequential (Direct -> Tor) to prevent OOM
-            // Do NOT race massive video segments in memory
-            try {
-                response = await axios.get(targetUrl, {
-                    headers: getProxyHeaders(targetUrl),
-                    timeout: 4000, // Fast fail for direct
-                    responseType: 'arraybuffer',
-                    maxContentLength: 15 * 1024 * 1024, // Safety limit 15MB
-                    validateStatus: (s) => s < 400
-                });
-            } catch (e: any) {
-                // If Direct fails, try Tor
-                // console.log(`[Proxy Segment] Direct failed. Retrying Tor...`);
+            // Segment: Sequential to prevent OOM
+            // Respect preferTor to avoid wasted attempts
+            const tryDirect = async () => axios.get(targetUrl, {
+                headers: getProxyHeaders(targetUrl),
+                timeout: 5000,
+                responseType: 'arraybuffer',
+                maxContentLength: 50 * 1024 * 1024, // Increased to 50MB
+                validateStatus: (s) => s < 400
+            });
+
+            const tryTor = async () => executeFetch(true);
+
+            if (preferTor) {
                 try {
-                    response = await executeFetch(true);
-                } catch (torErr: any) {
-                    throw new Error("Segment unreachable via Direct or Tor");
+                    response = await tryTor();
+                } catch {
+                    // console.log(`[Proxy Segment] Tor failed for preferred domain. Retrying Direct...`);
+                    try {
+                        response = await tryDirect();
+                    } catch {
+                        throw new Error("Segment unreachable via Tor or Direct");
+                    }
+                }
+            } else {
+                try {
+                    response = await tryDirect();
+                } catch {
+                    // console.log(`[Proxy Segment] Direct failed. Retrying Tor...`);
+                    try {
+                        response = await tryTor();
+                    } catch {
+                        throw new Error("Segment unreachable via Direct or Tor");
+                    }
                 }
             }
         }
