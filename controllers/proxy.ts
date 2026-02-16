@@ -2,17 +2,16 @@ import axios from "axios";
 import { Request, Response } from "express";
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { getPlayerUrl } from "../lib/getPlayerUrl";
+import stream from "stream";
+import { promisify } from "util";
+
+const pipeline = promisify(stream.pipeline);
 
 const torAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
 const manifestCookieJar = new Map<string, { cookie: string; timestamp: number }>();
 const MANIFEST_COOKIE_TTL_MS = 30 * 60 * 1000;
 const manifestResponseCache = new Map<string, { body: string; expiresAt: number }>();
 const MANIFEST_CACHE_TTL_MS = 60000;
-
-// Optimized Segment Cache (LRU-like)
-const SEGMENT_CACHE_LIMIT = 10; // Cache last 10 segments (approx 50MB max)
-const segmentCache = new Map<string, { data: Buffer; contentType: string; headers: any }>();
-const segmentCacheLastUsed: string[] = [];
 
 function extractCookieHeader(setCookieHeader: string[] | undefined): string {
     if (!setCookieHeader || !setCookieHeader.length) return "";
@@ -151,32 +150,6 @@ export default async function proxy(req: Request, res: Response) {
             }
         }
 
-        // Fast-path segment cache
-        if (isSegment) {
-            const cachedSegment = segmentCache.get(targetUrl);
-            if (cachedSegment) {
-                console.log(`[Proxy Cache] Serving cached segment: ${targetUrl.substring(0, 40)}...`);
-                res.setHeader("Access-Control-Allow-Origin", "*");
-                res.setHeader("Content-Type", cachedSegment.contentType);
-                res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-                res.setHeader("X-Cache", "HIT");
-
-                // Handle Range for cached items
-                if (req.headers.range) {
-                    const range = req.headers.range;
-                    const parts = range.replace(/bytes=/, "").split("-");
-                    const start = parseInt(parts[0], 10);
-                    const end = parts[1] ? parseInt(parts[1], 10) : cachedSegment.data.length - 1;
-                    const chunk = cachedSegment.data.slice(start, end + 1);
-                    res.setHeader("Content-Range", `bytes ${start}-${end}/${cachedSegment.data.length}`);
-                    res.setHeader("Content-Length", chunk.length);
-                    return res.status(206).send(chunk);
-                }
-
-                return res.send(cachedSegment.data);
-            }
-        }
-
         const getProxyHeaders = (url: string, refererOverride?: string) => {
             const uri = new URL(url);
             let referer = refererOverride || proxyRef || "https://allmovieland.link/";
@@ -205,20 +178,18 @@ export default async function proxy(req: Request, res: Response) {
         };
 
         const tryFetch = async (useTor: boolean, refererOverride?: string, customTimeout?: number) => {
-            const timeout = customTimeout || (isSegment ? (useTor ? 30000 : 15000) : (useTor ? 12000 : 6000));
+            // For streams, we can use a shorter connection timeout because we only wait for headers
+            const timeout = customTimeout || (isSegment ? (useTor ? 12000 : 6000) : (useTor ? 12000 : 6000));
             return await axios.get(targetUrl, {
                 headers: getProxyHeaders(targetUrl, refererOverride),
                 httpAgent: useTor ? torAgent : undefined,
                 httpsAgent: useTor ? torAgent : undefined,
-                responseType: isSegment ? 'arraybuffer' : 'text', // Changed to arraybuffer for segments to allow caching
+                responseType: 'stream',
                 timeout: timeout,
                 maxRedirects: 5,
                 validateStatus: (status) => status < 400
             });
         };
-
-        let response: any;
-        const preferTor = shouldPreferTor(targetUrl);
 
         const executeFetch = async (tor: boolean): Promise<any> => {
             try {
@@ -230,59 +201,30 @@ export default async function proxy(req: Request, res: Response) {
             }
         };
 
-        // Unified Racing Strategy: Always race Direct vs Tor
-        // This ensures:
-        // 1. alignment with whichever IP generated the link (fixing 404s)
-        // 2. minimum latency (instant playback)
-        // 3. automatic fallback if one lane fails
+        let response: any;
+        const preferTor = shouldPreferTor(targetUrl);
 
-        if (isM3U8) {
-            // Manifest: Race Direct vs Tor (Safe because text files are small)
-            // This ensures instant audio switching and IP alignment
-            try {
-                const directP = executeFetch(false).then(r => ({ r, lane: 'direct' }));
-                const torP = executeFetch(true).then(r => ({ r, lane: 'tor' }));
-                const winner = await Promise.any([directP, torP]);
-                response = winner.r;
-            } catch (e: any) {
-                throw new Error("Manifest unreachable via Direct or Tor");
-            }
-        } else {
-            // Segment: Sequential to prevent OOM
-            // Respect preferTor to avoid wasted attempts
-            const tryDirect = async () => axios.get(targetUrl, {
-                headers: getProxyHeaders(targetUrl),
-                timeout: 5000,
-                responseType: 'arraybuffer',
-                maxContentLength: 50 * 1024 * 1024, // Increased to 50MB
-                validateStatus: (s) => s < 400
-            });
+        try {
+            // UNIFIED STREAM RACING
+            // We use Promise.any to race the connection establishment (TTFB).
+            // Since we use responseType: 'stream', this resolves as soon as headers are received.
+            // This is extremely light on memory and ensures the fastest path is chosen instantly.
 
-            const tryTor = async () => executeFetch(true);
+            const reqs = [];
 
-            if (preferTor) {
-                try {
-                    response = await tryTor();
-                } catch {
-                    // console.log(`[Proxy Segment] Tor failed for preferred domain. Retrying Direct...`);
-                    try {
-                        response = await tryDirect();
-                    } catch {
-                        throw new Error("Segment unreachable via Tor or Direct");
-                    }
-                }
-            } else {
-                try {
-                    response = await tryDirect();
-                } catch {
-                    // console.log(`[Proxy Segment] Direct failed. Retrying Tor...`);
-                    try {
-                        response = await tryTor();
-                    } catch {
-                        throw new Error("Segment unreachable via Direct or Tor");
-                    }
-                }
-            }
+            // 1. Direct Request (Always try unless we know it's pointless, but for speed, let's try)
+            // Actually, if we prefer Tor, we should perhaps delay Direct slightly? No, race them.
+            // If Direct fails (403), it rejects fast. Tor takes over.
+            reqs.push(executeFetch(false).then(r => ({ r, lane: 'direct' })));
+
+            // 2. Tor Request
+            reqs.push(executeFetch(true).then(r => ({ r, lane: 'tor' })));
+
+            const winner = await Promise.any(reqs);
+            response = winner.r;
+
+        } catch (e: any) {
+            throw new Error("Unreachable via Direct or Tor (All lanes failed)");
         }
 
         if (!response) throw new Error("Fetch yielded no response");
@@ -290,11 +232,21 @@ export default async function proxy(req: Request, res: Response) {
         // Set Headers
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Expose-Headers", "*");
-
         const contentType = response.headers["content-type"];
 
         if (isM3U8) {
-            let content = response.data.toString();
+            // For Manifests, we need to read the stream to string to rewrite it
+            const streamToString = (stream: any): Promise<string> => {
+                const chunks: any[] = [];
+                return new Promise((resolve, reject) => {
+                    stream.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)));
+                    stream.on('error', (err: any) => reject(err));
+                    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+                });
+            };
+
+            let content = await streamToString(response.data);
+
             if (!content.includes('#EXTM3U')) return res.send(content);
 
             res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
@@ -331,31 +283,7 @@ export default async function proxy(req: Request, res: Response) {
             return res.send(rewrittenManifest);
         }
 
-        // Segment Logic
-        const dataBuffer = response.data; // use directly since it's already a Buffer from axios
-
-        // Save to cache
-        // Save to cache (wrap in try-catch to avoid OOM)
-        if (isSegment && dataBuffer.length < 5 * 1024 * 1024) { // Only cache segments < 5MB
-            try {
-                if (segmentCache.size >= SEGMENT_CACHE_LIMIT) {
-                    const oldest = segmentCacheLastUsed.shift();
-                    if (oldest) segmentCache.delete(oldest);
-                }
-                segmentCache.set(targetUrl, {
-                    data: dataBuffer,
-                    contentType: contentType || "video/mp2t",
-                    headers: response.headers
-                });
-                segmentCacheLastUsed.push(targetUrl);
-            } catch (e) {
-                console.warn("[Proxy Cache] Failed to cache segment (OOM protection):", e);
-                // Clear cache on error to free memory
-                segmentCache.clear();
-                segmentCacheLastUsed.length = 0;
-            }
-        }
-
+        // For Segments: Pipe the stream directly using pipeline to handle errors and cleanup
         res.setHeader("Content-Type", contentType || (isSegment ? "video/mp2t" : "application/octet-stream"));
         res.setHeader("Cache-Control", isSegment ? "public, max-age=31536000, immutable" : "no-cache");
 
@@ -364,12 +292,17 @@ export default async function proxy(req: Request, res: Response) {
             res.status(206);
         }
 
-        return res.send(dataBuffer);
+        if (response.headers["content-length"]) {
+            res.setHeader("Content-Length", response.headers["content-length"]);
+        }
+
+        // Pipe the response stream to the client
+        return response.data.pipe(res);
 
     } catch (error: any) {
         console.error(`[Proxy Error] ${error.message} for ${targetUrl}`);
         if (!res.headersSent) {
-            res.setHeader("Access-Control-Allow-Origin", "*"); // Ensure CORS even on error
+            res.setHeader("Access-Control-Allow-Origin", "*");
             res.status(500).send(`Streaming unreachable: ${error.message}`);
         }
     }
