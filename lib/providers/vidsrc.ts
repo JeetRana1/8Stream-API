@@ -16,7 +16,7 @@ export async function getVidSrcStream(id: string) {
             'https://vidsrc.me',
             'https://vidsrc.net',
             'https://vidsrc.xyz',
-            'https://vidsrc.icu'
+            'https://vidsrc.pm'
         ];
 
         for (const domain of domains) {
@@ -33,7 +33,6 @@ export async function getVidSrcStream(id: string) {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
                         "Referer": referer,
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
                     };
                     try {
                         return await axios.get(url, { headers, timeout: 8000 });
@@ -45,7 +44,7 @@ export async function getVidSrcStream(id: string) {
                                 headers,
                                 httpAgent: torAgent,
                                 httpsAgent: torAgent,
-                                timeout: 15000
+                                timeout: 25000
                             });
                         }
                         throw err;
@@ -57,104 +56,116 @@ export async function getVidSrcStream(id: string) {
 
                 // VidSrc typically has iframe with data-src or src
                 const iframe = $('iframe[data-src], iframe[src]').first();
-                let streamUrl = iframe.attr('data-src') || iframe.attr('src');
+                let innerUrl = iframe.attr('data-src') || iframe.attr('src');
 
-                if (streamUrl) {
-                    console.log(`[VidSrc] Found embed URL: ${streamUrl}`);
-
-                    // Normalize the URL
-                    if (streamUrl.startsWith('//')) {
-                        streamUrl = `https:${streamUrl}`;
-                    } else if (!streamUrl.startsWith('http')) {
-                        streamUrl = `${domain}${streamUrl.startsWith('/') ? streamUrl : '/' + streamUrl}`;
+                if (innerUrl) {
+                    // Normalize innerUrl
+                    if (innerUrl.startsWith('//')) {
+                        innerUrl = `https:${innerUrl}`;
+                    } else if (!innerUrl.startsWith('http')) {
+                        innerUrl = `${domain}${innerUrl.startsWith('/') ? innerUrl : '/' + innerUrl}`;
                     }
 
-                    // Now fetch the actual stream from the embed
-                    try {
-                        const embedResponse = await fetchWithFallback(streamUrl, embedUrl);
-                        const embed$ = cheerio.load(embedResponse.data);
+                    console.log(`[VidSrc] Found inner URL: ${innerUrl}`);
 
-                        // Look for HLS manifest URL in the embed page
-                        const scriptTags = embed$('script').toArray();
-                        for (const script of scriptTags) {
-                            const scriptContent = embed$(script).html() || '';
+                    // Fetch the inner page (this is usually where the player is)
+                    const innerResponse = await fetchWithFallback(innerUrl, embedUrl);
+                    const innerDoc = innerResponse.data;
+                    const inner$ = cheerio.load(innerDoc);
 
-                            // Look for m3u8 URLs in the script
-                            const m3u8Match = scriptContent.match(/https?:\/\/[^\s"']+\.m3u8[^\s"']*/);
-                            if (m3u8Match) {
-                                console.log(`[VidSrc] Found HLS URL: ${m3u8Match[0]}`);
+                    // SEARCH STRATEGY 1: Direct Regex in all scripts
+                    const scripts = inner$('script').toArray();
+                    for (const scriptSection of scripts) {
+                        const content = inner$(scriptSection).html() || '';
+
+                        // Look for common file/source/m3u8 patterns
+                        // Check for common obfuscated links (some start with base64)
+                        const patterns = [
+                            /https?:\/\/[^\s"'<>]+\.m3u8[^\s"']*/i,
+                            /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
+                            /src\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
+                            /source\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
+                            /url\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i
+                        ];
+
+                        for (const pattern of patterns) {
+                            const match = content.match(pattern);
+                            if (match) {
+                                let foundUrl = match[1] || match[0];
+                                if (foundUrl.startsWith('//')) foundUrl = 'https:' + foundUrl;
+
+                                console.log(`[VidSrc] Found HLS URL via Regex: ${foundUrl}`);
                                 return {
                                     success: true,
                                     data: {
-                                        playlist: [{
-                                            title: "VidSrc Stream",
-                                            file: m3u8Match[0],
-                                            folder: []
-                                        }],
-                                        key: "vidsrc_direct",
-                                        provider: "vidsrc"
-                                    }
-                                };
-                            }
-
-                            // Look for source URLs in various formats
-                            const sourceMatch = scriptContent.match(/["']?(?:source|file|src)["']?\s*:\s*["']([^"']+)["']/);
-                            if (sourceMatch && sourceMatch[1] && (sourceMatch[1].includes('m3u8') || sourceMatch[1].includes('.mp4'))) {
-                                console.log(`[VidSrc] Found source URL: ${sourceMatch[1]}`);
-                                return {
-                                    success: true,
-                                    data: {
-                                        playlist: [{
-                                            title: "VidSrc Stream",
-                                            file: sourceMatch[1].startsWith('//') ? `https:${sourceMatch[1]}` : sourceMatch[1],
-                                            folder: []
-                                        }],
+                                        playlist: [{ title: "VidSrc High", file: foundUrl, folder: [] }],
                                         key: "vidsrc_direct",
                                         provider: "vidsrc"
                                     }
                                 };
                             }
                         }
-
-                        // If we can't extract the HLS URL, return the embed URL itself
-                        // But only if it's not the same as the original embed URL to avoid loops
-                        console.log(`[VidSrc] Could not extract HLS, returning embed URL as fallback`);
-                        return {
-                            success: true,
-                            data: {
-                                playlist: [{
-                                    title: "VidSrc Stream (Fallback)",
-                                    file: streamUrl,
-                                    folder: []
-                                }],
-                                key: "vidsrc_embed",
-                                provider: "vidsrc"
-                            }
-                        };
-                    } catch (embedError: any) {
-                        console.log(`[VidSrc] Failed to fetch embed: ${embedError.message}`);
-                        return {
-                            success: true,
-                            data: {
-                                playlist: [{
-                                    title: "VidSrc Stream (Embed)",
-                                    file: streamUrl,
-                                    folder: []
-                                }],
-                                key: "vidsrc_embed",
-                                provider: "vidsrc"
-                            }
-                        };
                     }
+
+                    // SEARCH STRATEGY 2: Look for Base64 encoded strings that look like URLs
+                    const b64Regex = /["']([A-Za-z0-9+/=]{40,})["']/g;
+                    let b64Match;
+                    while ((b64Match = b64Regex.exec(innerDoc)) !== null) {
+                        try {
+                            const decoded = Buffer.from(b64Match[1], 'base64').toString();
+                            if (decoded.includes('.m3u8') || decoded.includes('.mp4') || decoded.includes('https://')) {
+                                const urlMatch = decoded.match(/https?:\/\/[^\s"']+/);
+                                if (urlMatch) {
+                                    console.log(`[VidSrc] Found HLS URL via Base64: ${urlMatch[0]}`);
+                                    return {
+                                        success: true,
+                                        data: {
+                                            playlist: [{ title: "VidSrc B64", file: urlMatch[0], folder: [] }],
+                                            key: "vidsrc_direct",
+                                            provider: "vidsrc"
+                                        }
+                                    };
+                                }
+                            }
+                        } catch { }
+                    }
+
+                    // SEARCH STRATEGY 3: Check for JWPlayer/VideoJS sources
+                    const sourceTags = inner$('source[src]').toArray();
+                    for (const s of sourceTags) {
+                        const sUrl = inner$(s).attr('src');
+                        if (sUrl && (sUrl.includes('.m3u8') || sUrl.includes('.mp4'))) {
+                            console.log(`[VidSrc] Found HLS URL via Source Tag: ${sUrl}`);
+                            return {
+                                success: true,
+                                data: {
+                                    playlist: [{ title: "VidSrc Source", file: sUrl, folder: [] }],
+                                    key: "vidsrc_direct",
+                                    provider: "vidsrc"
+                                }
+                            };
+                        }
+                    }
+
+                    // FALLBACK: Return the inner URL if no stream found
+                    console.log(`[VidSrc] Could not extract stream block, returning inner URL as fallback`);
+                    return {
+                        success: true,
+                        data: {
+                            playlist: [{ title: "VidSrc Link", file: innerUrl, folder: [] }],
+                            key: "vidsrc_embed",
+                            provider: "vidsrc"
+                        }
+                    };
                 }
             } catch (e: any) {
-                console.log(`[VidSrc] Failed ${domain}: ${e.message}`);
+                console.log(`[VidSrc] Error on ${domain}: ${e.message}`);
             }
         }
 
-        return { success: false, message: "VidSrc: No streams found" };
+        return { success: false, message: "VidSrc: Streams not found after searching all mirrors" };
     } catch (error: any) {
-        console.error(`[VidSrc] Error:`, error.message);
+        console.error(`[VidSrc] Critical Error:`, error.message);
         return { success: false, message: `VidSrc Error: ${error.message}` };
     }
 }
