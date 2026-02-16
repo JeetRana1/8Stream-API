@@ -66,16 +66,20 @@ export default async function proxy(req: Request, res: Response) {
     // 0. Loop Protection: Recursively unwrap anything pointing back to us
     const isInternal = (url: string) => {
         try {
-            const u = new URL(url);
+            const u = new URL(url.startsWith('http') ? url : `${protocol}://${host}${url.startsWith('/') ? '' : '/'}${url}`);
             const isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '0.0.0.0';
             const isOurHost = u.hostname === host.split(':')[0];
-            return isLocal || isOurHost;
+            // Only consider it internal if it's our host AND it has one of our proxy paths
+            const lower = url.toLowerCase();
+            return (isLocal || isOurHost) && (lower.includes('/api/v1/proxy') || lower.includes('/stream/'));
         } catch {
             return false;
         }
     };
 
-    while (targetUrl && isInternal(targetUrl)) {
+    let iterations = 0;
+    while (targetUrl && isInternal(targetUrl) && iterations < 5) {
+        iterations++;
         console.warn(`[Proxy] Unwrapping internal link: ${targetUrl}`);
         // 1. Un-nest ?url=
         const nestedMatch = targetUrl.match(/[?&]url=([^&]+)/);
@@ -83,13 +87,15 @@ export default async function proxy(req: Request, res: Response) {
             targetUrl = decodeURIComponent(nestedMatch[1]);
             continue;
         }
-        // 2. Un-nest /stream/path (catch base64)
+        // 2. Un-nest /stream/path (catch base64 or plain)
         const streamMatch = targetUrl.match(/\/stream\/([^?#/]+)/);
         if (streamMatch && streamMatch[1]) {
             let decoded = streamMatch[1];
+            // Try base64
             if (!decoded.startsWith('http') && /^[A-Za-z0-9+/=]+$/.test(decoded)) {
                 try {
-                    decoded = Buffer.from(decoded, 'base64').toString('utf-8');
+                    const tmp = Buffer.from(decoded, 'base64').toString('utf-8');
+                    if (tmp.startsWith('http')) decoded = tmp;
                 } catch { }
             }
             if (decoded && decoded !== streamMatch[1] && decoded.startsWith('http')) {
@@ -97,13 +103,19 @@ export default async function proxy(req: Request, res: Response) {
                 continue;
             }
         }
+        // If we found it's internal but can't unwrap to an external URL, it's a dead end/loop
         break;
     }
 
+    // Final Validation: Stop accidental self-proxying
+    if (isInternal(targetUrl)) {
+        console.error(`[Proxy] Infinite loop blocked: ${targetUrl}`);
+        return res.status(400).send("Proxy Loop Blocked");
+    }
+
     if (!targetUrl || !targetUrl.startsWith('http')) {
-        // Fallback: if it's still missing protocol, it might be a broken unwrap
-        if (targetUrl.startsWith('//')) targetUrl = 'https:' + targetUrl;
-        else if (!targetUrl.startsWith('http')) return res.status(400).send("Invalid Proxy Target");
+        if (targetUrl?.startsWith('//')) targetUrl = 'https:' + targetUrl;
+        else return res.status(400).send(`Invalid Proxy Target: ${targetUrl}`);
     }
 
     try {
@@ -225,7 +237,19 @@ export default async function proxy(req: Request, res: Response) {
 
             const isAlreadyProxied = (url: string) => {
                 const lower = url.toLowerCase();
-                return lower.includes('/api/v1/proxy') || lower.includes('/stream/') || lower.includes(host.split(':')[0].toLowerCase());
+                const ourHost = host.split(':')[0].toLowerCase();
+                // Check if it already contains our proxy endpoint or domain + stream
+                return lower.includes(`${ourHost}/api/v1/proxy`) || lower.includes(`${ourHost}/stream/`);
+            };
+
+            const resolveAbs = (uri: string) => {
+                try {
+                    if (uri.startsWith('http')) return uri;
+                    // Always resolve against the EXTERNAL targetUrl
+                    return new URL(uri, targetUrl).href;
+                } catch {
+                    return uri;
+                }
             };
 
             const rewrittenLines = lines.map((line: string) => {
@@ -233,20 +257,20 @@ export default async function proxy(req: Request, res: Response) {
                 if (!trimmed) return line;
 
                 if (trimmed.startsWith("#")) {
-                    // Tag Rewriting (Audio, Subtitles, Keys, Maps)
-                    return trimmed.replace(/(URI|SRC|EXT-X-MAP:URI|EXT-X-KEY:URI)=["']([^"']+)["']/g, (match: string, attr: string, uri: string) => {
-                        if (isAlreadyProxied(uri)) return match;
-                        const abs = uri.startsWith("http") ? uri : new URL(uri, targetUrl).href;
+                    // Tag Rewriting (Audio, Subtitles, Keys, Maps, etc.)
+                    // Matches: URI="...", SRC="...", or even unquoted URI=...
+                    return trimmed.replace(/(URI|SRC|EXT-X-MAP:URI|EXT-X-KEY:URI)=["']?([^"'\s,]+)["']?/g, (match: string, attr: string, uri: string) => {
+                        const abs = resolveAbs(uri);
+                        if (isAlreadyProxied(abs)) return match;
                         return `${attr}="${proxyBase}${encodeURIComponent(abs)}${proxySuffix}"`;
                     });
                 }
 
-                // Path Rewriting (Segments, Variant Manifests)
-                if (trimmed.startsWith('http') || (!trimmed.includes(':') && trimmed.includes('.')) || trimmed.startsWith('/')) {
-                    if (isAlreadyProxied(trimmed)) return line;
-                    const abs = trimmed.startsWith("http") ? trimmed : new URL(trimmed, targetUrl).href;
-                    // If the absolute URL points back to us, don't proxy it again
-                    if (isAlreadyProxied(abs)) return trimmed;
+                // Path Rewriting (Segments, Variant Manifests, Audio Tracks)
+                // Filter: anything that doesn't start with '#' and looks like a URL or path
+                if (!trimmed.startsWith("#") && (trimmed.startsWith('http') || trimmed.includes('.') || trimmed.includes('/') || trimmed.includes('?'))) {
+                    const abs = resolveAbs(trimmed);
+                    if (isAlreadyProxied(abs)) return line;
                     return `${proxyBase}${encodeURIComponent(abs)}${proxySuffix}`;
                 }
 
