@@ -82,11 +82,17 @@ export default async function getInfo(id: string) {
                 response = await axios.get(targetUrl, fetchOptions);
                 console.log(`[getInfo] Fetch Success: ${targetUrl} (${response.data ? String(response.data).length : 0} bytes)`);
               } catch (err: any) {
-                if (!useTor && (err.code === 'ECONNABORTED' || err.response?.status === 403 || err.response?.status === 404)) {
-                  console.warn(`[getInfo] Fetch Failed (Retryable): ${targetUrl} - ${err.message}`);
+                const status = err.response?.status;
+                if (!useTor && (status === 503 || status === 403 || status === 429)) {
+                  console.warn(`[getInfo] Blocked (503/403) at ${targetUrl}. Re-tasking with Tor...`);
+                  // Force Tor for this specific URL in a one-off retry
+                  try {
+                    response = await axios.get(targetUrl, { ...fetchOptions, httpAgent: torAgent, httpsAgent: torAgent, timeout: 20000 });
+                    console.log(`[getInfo] Tor Retry Success: ${targetUrl}`);
+                  } catch (retryErr) { return; }
+                } else if (!useTor && (err.code === 'ECONNABORTED' || status === 404)) {
                   return;
                 } else {
-                  console.error(`[getInfo] Fetch Error: ${targetUrl} - ${err.response?.status || err.code}`);
                   return;
                 }
               }
@@ -112,8 +118,7 @@ export default async function getInfo(id: string) {
                 const keyMatch = script.match(/["']?key["']?\s*[:=]\s*["']([^"']+)["']/);
 
                 if (fileMatch && fileMatch[2]) {
-                  foundPotentialMetadata = true;
-                  let rawFile = fileMatch[2].replace(/\\\/|\\\//g, "/"); // Deep unescape
+                  const rawFile = fileMatch[2].replace(/\\\/|\\\//g, "/"); // Deep unescape
                   const key = (keyMatch ? keyMatch[2] : "").replace(/\\\/|\\\//g, "/");
 
                   // Handle potential Base64 encoding
@@ -121,7 +126,6 @@ export default async function getInfo(id: string) {
                   if (!file.startsWith('http') && !file.startsWith('/') && !file.includes('.') && /^[A-Za-z0-9+/=]+$/.test(file)) {
                     try {
                       const decoded = Buffer.from(file, 'base64').toString('utf-8');
-                      // If it's a valid URL or path after decoding, use it
                       if (decoded.startsWith('http') || decoded.startsWith('/') || decoded.includes('.m3u8')) {
                         file = decoded;
                       }
@@ -138,12 +142,11 @@ export default async function getInfo(id: string) {
                     } else if (file.startsWith("//")) {
                       playlistUrl = `https:${file}`;
                     } else {
-                      // Ensure file starts with / for URL constructor
-                      const cleanPath = file.startsWith('/') ? file : `/${file}`;
+                      // Handle paths starting with ~ or just plain filenames
+                      const cleanPath = file.startsWith('/') ? file : (file.startsWith('~') ? `/${file}` : `/${file}`);
                       playlistUrl = new URL(cleanPath, baseOrigin).href;
                     }
 
-                    // Safety check: Fix double slashes in path (except protocol)
                     const finalUrl = new URL(playlistUrl);
                     finalUrl.pathname = finalUrl.pathname.replace(/\/+/g, '/');
                     playlistUrl = finalUrl.href;
@@ -151,8 +154,11 @@ export default async function getInfo(id: string) {
                     playlistUrl = file.startsWith('http') ? file : `${domain}/${file.replace(/^\//, '')}`;
                   }
 
+                  // We found SOMETHING that looks like metadata
+                  foundPotentialMetadata = true;
+
                   try {
-                    console.log(`[getInfo] Validating playlist: ${playlistUrl} (ID: ${id})`);
+                    console.log(`[getInfo] Found candidate: ${playlistUrl} (ID: ${id})`);
 
                     const fetchPlaylist = async (useTorAgent: boolean) => {
                       return await axios.get(playlistUrl, {
@@ -172,32 +178,41 @@ export default async function getInfo(id: string) {
                     try {
                       playlistRes = await fetchPlaylist(false);
                     } catch (fetchErr) {
-                      console.warn(`[getInfo] Primary validation failed, trying Tor: ${playlistUrl}`);
+                      // If it's a mirror we usually use Tor for, try Tor failover
+                      console.warn(`[getInfo] Direct check failed for ${id}, trying Tor failover...`);
                       playlistRes = await fetchPlaylist(true);
                     }
 
-                    let playlist: any[] = [];
-                    if (Array.isArray(playlistRes.data)) {
-                      playlist = playlistRes.data;
-                    } else if (playlistRes.data && typeof playlistRes.data === 'object' && playlistRes.data.list) {
-                      playlist = playlistRes.data.list;
-                    } else if (typeof playlistRes.data === 'string' && (playlistRes.data.includes('#EXTM3U') || playlistRes.data.includes('playlist') || playlistRes.data.includes('m3u8'))) {
-                      playlist = [{ file: playlistUrl, label: "Auto", type: "hls" }];
-                    }
+                    if (playlistRes && playlistRes.data) {
+                      let playlist: any[] = [];
+                      if (Array.isArray(playlistRes.data)) {
+                        playlist = playlistRes.data;
+                      } else if (playlistRes.data && typeof playlistRes.data === 'object' && playlistRes.data.list) {
+                        playlist = playlistRes.data.list;
+                      } else if (typeof playlistRes.data === 'string' && (playlistRes.data.includes('#EXTM3U') || playlistRes.data.includes('playlist') || playlistRes.data.includes('m3u8'))) {
+                        playlist = [{ file: playlistUrl, label: "Auto", type: "hls" }];
+                      }
 
-                    playlist = playlist.filter((item: any) => item && (item.file || item.folder || item.src));
+                      playlist = playlist.filter((item: any) => item && (item.file || item.folder || item.src));
 
-                    if (playlist.length > 0 && !resolvedData) {
-                      console.log(`[getInfo] SUCCESS: Found ${playlist.length} tracks at ${targetUrl}`);
-                      resolvedData = { success: true, data: { playlist, key } };
-                      return;
+                      if (playlist.length > 0 && !resolvedData) {
+                        console.log(`[getInfo] SUCCESS: Validated ${playlist.length} tracks at ${targetUrl}`);
+                        resolvedData = { success: true, data: { playlist, key } };
+                        return;
+                      }
                     }
                   } catch (e: any) {
                     console.warn(`[getInfo] Validation failed for ${id}: ${e.message}`);
-                    // Critical Fallback: Use the link anyway if it looks like a direct HLS or manifest file
-                    if (!resolvedData && (playlistUrl.includes('.m3u8') || playlistUrl.includes('.txt') || playlistUrl.includes('playlist'))) {
-                      console.log(`[getInfo] Using Fallback Link: ${playlistUrl}`);
-                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream (Direct)", type: "hls" }], key } };
+
+                    // CRITICAL FALLBACK for obfuscated paths (like those starting with ~ or with complex tokens)
+                    const looksLikePlaylist = playlistUrl.includes('.m3u8') ||
+                      playlistUrl.includes('.txt') ||
+                      playlistUrl.includes('playlist') ||
+                      playlistUrl.includes('/~');
+
+                    if (!resolvedData && looksLikePlaylist) {
+                      console.log(`[getInfo] Mirror ${domain} has content but blocked validation. Using direct fallback.`);
+                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream (Fixed)", type: "hls" }], key } };
                       return;
                     }
                   }
