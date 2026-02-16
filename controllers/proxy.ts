@@ -134,7 +134,8 @@ export default async function proxy(req: Request, res: Response) {
 
     const proxyRef = req.query.proxy_ref as string;
     const isM3U8 = targetUrl.includes('.m3u8') || targetUrl.includes('.txt');
-    const isSegment = targetUrl.includes('.ts') || targetUrl.includes('.mp4') || targetUrl.includes('.m4s');
+    const isSegment = targetUrl.includes('.ts') || targetUrl.includes('.mp4') || targetUrl.includes('.m4s')
+        || targetUrl.includes('.aac') || targetUrl.includes('.ac3') || targetUrl.includes('.ec3') || targetUrl.includes('.m4a');
 
     try {
         const manifestCacheKey = `${targetUrl}|${String(req.query.proxy_ref || "")}`;
