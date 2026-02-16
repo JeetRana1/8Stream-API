@@ -28,13 +28,23 @@ export default async function getInfo(id: string) {
         .filter(Boolean)
     ));
 
-    const paths = [`/play/${id}`, `/play/${id}?tr=1`, `/play/${id}?tr=2`, `/v/${id}`, `/watch/${id}`];
-    const refererCandidates = ["https://allmovieland.link/", "https://google.com/"];
+    const paths = [
+      `/play/${id}`, `/play/${id}?tr=1`, `/play/${id}?tr=2`, `/play/${id}?tr=3`,
+      `/play/${id}?tr=4`, `/play/${id}?tr=5`,
+      `/v/${id}`, `/watch/${id}`, `/watch/${id}?tr=1`, `/watch/${id}?tr=2`
+    ];
+    const refererCandidates = [
+      "https://allmovieland.link/",
+      "https://google.com/",
+      "https://vidsrc.me/",
+      `https://allmovieland.io/play/${id}`,
+      "https://w1.vidsrc.xyz/"
+    ];
 
     let resolvedData: any = null;
     let foundPotentialMetadata = false;
 
-    console.log(`[getInfo] Racing ${domains.length} domains for ID: ${id}`);
+    console.log(`[getInfo] RACING ${domains.length} domains against ${paths.length} paths for ID: ${id}`);
 
     // 2. Race Generation: Flatten all domain/path/referer combinations into a single set of parallel tasks
     const tasks: Promise<void>[] = [];
@@ -111,27 +121,34 @@ export default async function getInfo(id: string) {
                   if (!file.startsWith('http') && !file.startsWith('/') && !file.includes('.') && /^[A-Za-z0-9+/=]+$/.test(file)) {
                     try {
                       const decoded = Buffer.from(file, 'base64').toString('utf-8');
-                      if (decoded.startsWith('http') || decoded.startsWith('/') || decoded.includes('.m3u8')) file = decoded;
+                      // If it's a valid URL or path after decoding, use it
+                      if (decoded.startsWith('http') || decoded.startsWith('/') || decoded.includes('.m3u8')) {
+                        file = decoded;
+                      }
                     } catch { }
                   }
 
                   let playlistUrl = "";
                   try {
+                    const domainForBase = domain.startsWith('http') ? domain : `https://${domain}`;
+                    const baseOrigin = new URL(domainForBase).origin;
+
                     if (file.startsWith("http")) {
                       playlistUrl = file;
                     } else if (file.startsWith("//")) {
                       playlistUrl = `https:${file}`;
                     } else {
-                      const baseOrigin = domain.startsWith('http') ? domain : `https://${domain}`;
-                      const urlObj = new URL(file.startsWith('/') ? file : `/${file}`, baseOrigin);
-                      playlistUrl = urlObj.href;
+                      // Ensure file starts with / for URL constructor
+                      const cleanPath = file.startsWith('/') ? file : `/${file}`;
+                      playlistUrl = new URL(cleanPath, baseOrigin).href;
                     }
-                    // Final clean-up of double slashes in the PATH only
-                    const u = new URL(playlistUrl);
-                    u.pathname = u.pathname.replace(/\/+/g, '/');
-                    playlistUrl = u.href;
+
+                    // Safety check: Fix double slashes in path (except protocol)
+                    const finalUrl = new URL(playlistUrl);
+                    finalUrl.pathname = finalUrl.pathname.replace(/\/+/g, '/');
+                    playlistUrl = finalUrl.href;
                   } catch (err) {
-                    playlistUrl = file.startsWith('http') ? file : `${domain}/${file}`;
+                    playlistUrl = file.startsWith('http') ? file : `${domain}/${file.replace(/^\//, '')}`;
                   }
 
                   try {
