@@ -215,60 +215,67 @@ export default async function proxy(req: Request, res: Response) {
         let response: any;
         const preferTor = shouldPreferTor(targetUrl);
 
+        const executeFetch = async (tor: boolean): Promise<any> => {
+            try {
+                return await tryFetch(tor);
+            } catch (err: any) {
+                // If it's a 403/401, we want to know so we can try the other lane
+                err.isAuthError = err.response?.status === 403 || err.response?.status === 401;
+                throw err;
+            }
+        };
+
         if (isM3U8) {
-            // Manifest Speed Optimization: Parallel Fetching
+            // Manifest Rule: Race Direct and Tor in parallel unless forced Tor
             if (!preferTor) {
                 try {
-                    const directPromise = tryFetch(false).then(r => ({ r }));
-                    const torPromise = tryFetch(true).then(r => ({ r }));
-                    const winner = await Promise.any([directPromise, torPromise]);
+                    // Wrap in objects to satisfy Promise.any's requirement for success
+                    const directP = executeFetch(false).then(r => ({ r }));
+                    const torP = executeFetch(true).then(r => ({ r }));
+                    const winner = await Promise.any([directP, torP]);
                     response = winner.r;
-                } catch (e) {
-                    throw new Error("Both Direct and Tor failed for manifest");
+                } catch (e: any) {
+                    // If everything failed, try a last-ditch Tor fetch (in case AggregateError obscured success)
+                    try {
+                        response = await executeFetch(true);
+                    } catch {
+                        throw new Error("Manifest unreachable via all lanes");
+                    }
                 }
             } else {
                 try {
-                    response = await tryFetch(true);
+                    response = await executeFetch(true);
                 } catch {
-                    response = await tryFetch(false);
+                    response = await executeFetch(false);
                 }
             }
         } else {
-            // Segment Optimization: Adaptive Race
-            // If Direct doesn't respond in 1500ms, start Tor in parallel
+            // Segment Rule: Direct-First with Fast Fallback to Tor
             if (preferTor) {
-                response = await tryFetch(true);
-            } else {
                 try {
-                    const directPromise = tryFetch(false);
-                    const torFallbackTimer = new Promise((_, reject) => setTimeout(() => reject('timeout'), 1500));
-
-                    try {
-                        response = await Promise.race([directPromise, torFallbackTimer]);
-                    } catch (e) {
-                        if (e === 'timeout') {
-                            console.log(`[Proxy Segment] Direct slow for ${targetUrl.substring(0, 30)}. Racing with Tor...`);
-                            const torPromise = tryFetch(true);
-                            response = await Promise.any([directPromise, torPromise]);
-                        } else {
-                            throw e;
-                        }
-                    }
+                    response = await executeFetch(true);
+                } catch {
+                    response = await executeFetch(false);
+                }
+            } else {
+                let directFailed = false;
+                try {
+                    // Try direct with a relatively short timeout for the "first" response
+                    response = await axios.get(targetUrl, {
+                        headers: getProxyHeaders(targetUrl),
+                        timeout: 5000, // Quick timeout for direct segment
+                        responseType: 'arraybuffer',
+                        validateStatus: (s) => s < 400
+                    });
                 } catch (e: any) {
-                    if (e.message?.includes('403') || e.message?.includes('401') || e.code === 'ECONNABORTED' || e.name === 'AggregateError') {
-                        try {
-                            response = await tryFetch(true);
-                        } catch (innerErr) {
-                            throw innerErr;
-                        }
-                    } else {
-                        throw e;
-                    }
+                    directFailed = true;
+                    console.log(`[Proxy Segment] Direct failed for ${targetUrl.substring(0, 40)}. Falling back to Tor...`);
+                    response = await executeFetch(true);
                 }
             }
         }
 
-        if (!response) throw new Error("Fetch failed");
+        if (!response) throw new Error("Fetch yielded no response");
 
         // Set Headers
         res.setHeader("Access-Control-Allow-Origin", "*");
@@ -318,7 +325,7 @@ export default async function proxy(req: Request, res: Response) {
         const dataBuffer = Buffer.from(response.data);
 
         // Save to cache
-        if (isSegment && dataBuffer.length < 5 * 1024 * 1024) { // Only cache segments < 5MB
+        if (isSegment && dataBuffer.length < 5 * 1024 * 1024) {
             if (segmentCache.size >= SEGMENT_CACHE_LIMIT) {
                 const oldest = segmentCacheLastUsed.shift();
                 if (oldest) segmentCache.delete(oldest);
@@ -342,7 +349,9 @@ export default async function proxy(req: Request, res: Response) {
         return res.send(dataBuffer);
 
     } catch (error: any) {
-        if (!isSegment) console.error(`[Proxy Fatal] ${error.message} for ${targetUrl}`);
-        if (!res.headersSent) res.status(500).send("Streaming unreachable");
+        console.error(`[Proxy Error] ${error.message} for ${targetUrl}`);
+        if (!res.headersSent) {
+            res.status(500).send(`Streaming unreachable: ${error.message}`);
+        }
     }
 }
