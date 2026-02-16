@@ -429,22 +429,21 @@ export default async function getStream(req: Request, res: Response) {
               };
 
               try {
-                // Race Direct & Tor to prevent waiting on one lane
-                // Reduced timeouts: 3.5s direct, 7s Tor (was 9s/13s)
-                const directP = axios.get(url, { headers, timeout: 3500 });
-                const torP = axios.get(url, {
-                  headers,
-                  httpAgent: torAgent,
-                  httpsAgent: torAgent,
-                  timeout: 7000
-                });
-
-                const winner = await Promise.any([directP, torP]);
-                const isOk = await evaluateCandidateResponse(winner, url);
-                if (isOk) break;
+                const directRes = await axios.get(url, { headers, timeout: 5000 });
+                const directOk = await evaluateCandidateResponse(directRes, url);
+                if (directOk) break;
               } catch (err: any) {
-                // Both failed
-                errors.push(`${url} -> both lanes failed`);
+                errors.push(`${url} -> direct(${referer}) failed: ${err?.message || "failed"}`);
+              }
+
+              // Important: some mirrors return HTTP 200 with empty/blocked body on direct lane.
+              // Always retry invalid candidates over Tor before moving on.
+              try {
+                const torRes = await fetchUpstreamUrlViaTor(url, headers);
+                const torOk = await evaluateCandidateResponse(torRes, url);
+                if (torOk) break;
+              } catch (err: any) {
+                errors.push(`${url} -> tor(${referer}) failed: ${err?.message || "failed"}`);
               }
             }
 
