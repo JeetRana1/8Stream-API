@@ -102,12 +102,12 @@ export default async function getInfo(id: string) {
                 const keyMatch = script.match(/["']?key["']?\s*[:=]\s*["']([^"']+)["']/);
 
                 if (fileMatch && fileMatch[2]) {
-                  console.log(`[getInfo] Match found in script! file: ${fileMatch[2].substring(0, 50)}...`);
                   foundPotentialMetadata = true;
-                  let file = fileMatch[2].replace(/\\\//g, "/"); // Unescape JSON-escaped slashes
-                  const key = (keyMatch ? keyMatch[2] : "").replace(/\\\//g, "/");
+                  let rawFile = fileMatch[2].replace(/\\\/|\\\//g, "/"); // Deep unescape
+                  const key = (keyMatch ? keyMatch[2] : "").replace(/\\\/|\\\//g, "/");
 
                   // Handle potential Base64 encoding
+                  let file = rawFile;
                   if (!file.startsWith('http') && !file.startsWith('/') && !file.includes('.') && /^[A-Za-z0-9+/=]+$/.test(file)) {
                     try {
                       const decoded = Buffer.from(file, 'base64').toString('utf-8');
@@ -122,30 +122,42 @@ export default async function getInfo(id: string) {
                     } else if (file.startsWith("//")) {
                       playlistUrl = `https:${file}`;
                     } else {
-                      // Use URL constructor for safe joining
-                      const base = new URL(domain.startsWith('http') ? domain : `https://${domain}`);
-                      playlistUrl = new URL(file, base).href;
+                      const baseOrigin = domain.startsWith('http') ? domain : `https://${domain}`;
+                      const urlObj = new URL(file.startsWith('/') ? file : `/${file}`, baseOrigin);
+                      playlistUrl = urlObj.href;
                     }
-                    // Final sanitization of any weird double slashes in path (safely)
+                    // Final clean-up of double slashes in the PATH only
                     const u = new URL(playlistUrl);
                     u.pathname = u.pathname.replace(/\/+/g, '/');
                     playlistUrl = u.href;
                   } catch (err) {
-                    console.error(`[getInfo] URL Construction failed for file=${file}, domain=${domain}`);
-                    playlistUrl = file;
+                    playlistUrl = file.startsWith('http') ? file : `${domain}/${file}`;
                   }
 
                   try {
-                    console.log(`[getInfo] Validating playlist: ${playlistUrl} for ID: ${id}`);
-                    const playlistRes = await axios.get(playlistUrl, {
-                      headers: {
-                        "User-Agent": headers["User-Agent"],
-                        "Referer": targetUrl,
-                        "X-Csrf-Token": key || "0",
-                        "Accept": "*/*"
-                      },
-                      timeout: 12000
-                    });
+                    console.log(`[getInfo] Validating playlist: ${playlistUrl} (ID: ${id})`);
+
+                    const fetchPlaylist = async (useTorAgent: boolean) => {
+                      return await axios.get(playlistUrl, {
+                        headers: {
+                          "User-Agent": headers["User-Agent"],
+                          "Referer": targetUrl,
+                          "X-Csrf-Token": key || "0",
+                          "Accept": "*/*"
+                        },
+                        timeout: useTorAgent ? 15000 : 10000,
+                        httpAgent: useTorAgent ? torAgent : undefined,
+                        httpsAgent: useTorAgent ? torAgent : undefined
+                      });
+                    };
+
+                    let playlistRes;
+                    try {
+                      playlistRes = await fetchPlaylist(false);
+                    } catch (fetchErr) {
+                      console.warn(`[getInfo] Primary validation failed, trying Tor: ${playlistUrl}`);
+                      playlistRes = await fetchPlaylist(true);
+                    }
 
                     let playlist: any[] = [];
                     if (Array.isArray(playlistRes.data)) {
@@ -153,7 +165,6 @@ export default async function getInfo(id: string) {
                     } else if (playlistRes.data && typeof playlistRes.data === 'object' && playlistRes.data.list) {
                       playlist = playlistRes.data.list;
                     } else if (typeof playlistRes.data === 'string' && (playlistRes.data.includes('#EXTM3U') || playlistRes.data.includes('playlist') || playlistRes.data.includes('m3u8'))) {
-                      // It's a direct HLS manifest! Convert to internal format
                       playlist = [{ file: playlistUrl, label: "Auto", type: "hls" }];
                     }
 
@@ -165,12 +176,11 @@ export default async function getInfo(id: string) {
                       return;
                     }
                   } catch (e: any) {
-                    console.warn(`[getInfo] Validation failed for ${playlistUrl}: ${e.message}`);
-
-                    // Fallback: If it's a direct .m3u8 link, try to use it even if validation fetch failed (might be CORS or referer issues on our end)
-                    if (playlistUrl.includes('.m3u8') && !resolvedData) {
-                      console.log(`[getInfo] Using fallback HLS link: ${playlistUrl}`);
-                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream (Fallback)", type: "hls" }], key } };
+                    console.warn(`[getInfo] Validation failed for ${id}: ${e.message}`);
+                    // Critical Fallback: Use the link anyway if it looks like a direct HLS or manifest file
+                    if (!resolvedData && (playlistUrl.includes('.m3u8') || playlistUrl.includes('.txt') || playlistUrl.includes('playlist'))) {
+                      console.log(`[getInfo] Using Fallback Link: ${playlistUrl}`);
+                      resolvedData = { success: true, data: { playlist: [{ file: playlistUrl, label: "Stream (Direct)", type: "hls" }], key } };
                       return;
                     }
                   }
