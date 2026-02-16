@@ -212,24 +212,18 @@ export default async function proxy(req: Request, res: Response) {
             });
         };
 
-        let response;
+        let response: any;
         const preferTor = shouldPreferTor(targetUrl);
 
         if (isM3U8) {
             // Manifest Speed Optimization: Parallel Fetching
-            // If not forced Tor, try both Direct and Tor in parallel and take the winner
             if (!preferTor) {
                 try {
-                    // Start both, but wrap them so we can identify success
-                    const directPromise = tryFetch(false).then(r => ({ r, tor: false }));
-                    const torPromise = tryFetch(true).then(r => ({ r, tor: true }));
-
-                    // Race them, but we only want the FIRST successful one
-                    const firstSuccess = await Promise.any([directPromise, torPromise]);
-                    response = firstSuccess.r;
-                    console.log(`[Proxy Manifest] ${firstSuccess.tor ? 'Tor' : 'Direct'} won race for ${targetUrl.substring(0, 40)}`);
+                    const directPromise = tryFetch(false).then(r => ({ r }));
+                    const torPromise = tryFetch(true).then(r => ({ r }));
+                    const winner = await Promise.any([directPromise, torPromise]);
+                    response = winner.r;
                 } catch (e) {
-                    // If both failed, we throw
                     throw new Error("Both Direct and Tor failed for manifest");
                 }
             } else {
@@ -240,15 +234,33 @@ export default async function proxy(req: Request, res: Response) {
                 }
             }
         } else {
-            // Segment Optimization: Sequential with aggressive fallback
+            // Segment Optimization: Adaptive Race
+            // If Direct doesn't respond in 1500ms, start Tor in parallel
             if (preferTor) {
                 response = await tryFetch(true);
             } else {
                 try {
-                    response = await tryFetch(false);
+                    const directPromise = tryFetch(false);
+                    const torFallbackTimer = new Promise((_, reject) => setTimeout(() => reject('timeout'), 1500));
+
+                    try {
+                        response = await Promise.race([directPromise, torFallbackTimer]);
+                    } catch (e) {
+                        if (e === 'timeout') {
+                            console.log(`[Proxy Segment] Direct slow for ${targetUrl.substring(0, 30)}. Racing with Tor...`);
+                            const torPromise = tryFetch(true);
+                            response = await Promise.any([directPromise, torPromise]);
+                        } else {
+                            throw e;
+                        }
+                    }
                 } catch (e: any) {
-                    if (e.message.includes('403') || e.message.includes('401') || e.code === 'ECONNABORTED') {
-                        response = await tryFetch(true);
+                    if (e.message?.includes('403') || e.message?.includes('401') || e.code === 'ECONNABORTED' || e.name === 'AggregateError') {
+                        try {
+                            response = await tryFetch(true);
+                        } catch (innerErr) {
+                            throw innerErr;
+                        }
                     } else {
                         throw e;
                     }

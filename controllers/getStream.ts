@@ -158,6 +158,7 @@ async function fetchUpstreamUrlViaTor(url: string, headers: Record<string, strin
 }
 
 async function isCachedStreamStillValid(streamUrl: string, refererHint: string): Promise<boolean> {
+  // If we have an expiry in the URL, trust it for a while without probing
   try {
     const parsed = new URL(streamUrl);
     const expiresRaw = parsed.searchParams.get("expires");
@@ -165,73 +166,44 @@ async function isCachedStreamStillValid(streamUrl: string, refererHint: string):
       const expiresUnix = Number(expiresRaw);
       if (Number.isFinite(expiresUnix) && expiresUnix > 0) {
         const remainingMs = (expiresUnix * 1000) - Date.now();
-        // If it is about to expire, force refresh now instead of returning a soon-dead URL.
+        // If it still has more than 10 minutes, trust it without a network probe
+        if (remainingMs > 10 * 60 * 1000) return true;
+        // If it's about to expire (< 2 mins), it's invalid
         if (remainingMs < 2 * 60 * 1000) return false;
       }
     }
-  } catch {
-    // Ignore parse failures and continue with active probe.
-  }
+  } catch { }
 
-  const defaultReferer = (() => {
-    if (refererHint) return refererHint;
-    try {
-      return `${new URL(streamUrl).origin}/`;
-    } catch {
-      return "";
-    }
-  })();
-
-  const defaultOrigin = (() => {
-    try {
-      return new URL(defaultReferer).origin;
-    } catch {
-      return "";
-    }
-  })();
-
+  // Otherwise, do a very fast HEAD or small GET probe
+  const defaultReferer = refererHint || "https://allmovieland.link/";
   const probeHeaders: Record<string, string> = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    ...(defaultReferer ? { "Referer": defaultReferer } : {}),
-    ...(defaultOrigin ? { "Origin": defaultOrigin } : {})
-  };
-
-  const isProbeValid = (status: number, contentType: string, body: unknown) => {
-    if (status >= 400) return false;
-    const ct = (contentType || "").toLowerCase();
-    if (ct.includes("mpegurl")) return true;
-    if (typeof body === "string" && body.includes("#EXTM3U")) return true;
-    return false;
+    "Referer": defaultReferer,
+    "Accept": "*/*"
   };
 
   try {
-    const direct = await axios.get(streamUrl, {
+    // Try a very fast HEAD request first
+    const headRes = await axios.head(streamUrl, {
       headers: probeHeaders,
-      timeout: 5000,
-      responseType: "text",
-      validateStatus: () => true
+      timeout: 3000,
+      validateStatus: (s) => s < 400
     });
-    if (isProbeValid(direct.status, String(direct.headers?.["content-type"] || ""), direct.data)) {
-      return true;
+    if (headRes.status < 400) return true;
+  } catch {
+    // Fallback to a small GET if HEAD fails
+    try {
+      const getRes = await axios.get(streamUrl, {
+        headers: { ...probeHeaders, Range: "bytes=0-100" },
+        timeout: 4000,
+        validateStatus: (s) => s < 400
+      });
+      return getRes.status < 400;
+    } catch {
+      return false;
     }
-  } catch {
-    // Try Tor as fallback for strict hosts.
   }
-
-  try {
-    const tor = await axios.get(streamUrl, {
-      headers: probeHeaders,
-      httpAgent: torAgent,
-      httpsAgent: torAgent,
-      timeout: 7000,
-      responseType: "text",
-      validateStatus: () => true
-    });
-    return isProbeValid(tor.status, String(tor.headers?.["content-type"] || ""), tor.data);
-  } catch {
-    return false;
-  }
+  return false;
 }
 
 export default async function getStream(req: Request, res: Response) {
