@@ -7,10 +7,10 @@ const torAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
 const manifestCookieJar = new Map<string, { cookie: string; timestamp: number }>();
 const MANIFEST_COOKIE_TTL_MS = 30 * 60 * 1000;
 const manifestResponseCache = new Map<string, { body: string; expiresAt: number }>();
-const MANIFEST_CACHE_TTL_MS = 10000;
+const MANIFEST_CACHE_TTL_MS = 60000;
 
 // Optimized Segment Cache (LRU-like)
-const SEGMENT_CACHE_LIMIT = 20; // Cache last 20 segments (approx 100MB max)
+const SEGMENT_CACHE_LIMIT = 10; // Cache last 10 segments (approx 50MB max)
 const segmentCache = new Map<string, { data: Buffer; contentType: string; headers: any }>();
 const segmentCacheLastUsed: string[] = [];
 
@@ -315,7 +315,7 @@ export default async function proxy(req: Request, res: Response) {
         }
 
         // Segment Logic
-        const dataBuffer = Buffer.from(response.data);
+        const dataBuffer = response.data; // use directly since it's already a Buffer from axios
 
         // Save to cache
         // Save to cache (wrap in try-catch to avoid OOM)
